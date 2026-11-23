@@ -86,9 +86,10 @@ class _AppTitleBarObserver extends NavigatorObserver {
 final NavigatorObserver _titleBarObserver = _AppTitleBarObserver();
 
 class KniephosApp extends StatelessWidget {
-  const KniephosApp({super.key, required this.state});
+  const KniephosApp({super.key, required this.state, this.fullUpdateTag});
 
   final AppState state;
+  final String? fullUpdateTag;
 
   @override
   Widget build(BuildContext context) {
@@ -151,7 +152,10 @@ class KniephosApp extends StatelessWidget {
               return windowFrame(frame);
             },
             // 启动后检查 GitHub release，有新版本就弹窗（见 UpdateGate）。
-            home: const UpdateGate(child: AppShell()),
+            home: UpdateGate(
+              fullUpdateTag: fullUpdateTag,
+              child: const AppShell(),
+            ),
           );
         },
       ),

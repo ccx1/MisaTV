@@ -8,9 +8,10 @@ import 'update_dialog.dart';
 
 /// 启动后检查一次更新；有新版本就弹窗（点「稍后提醒」下次启动会再弹）。
 class UpdateGate extends StatefulWidget {
-  const UpdateGate({super.key, required this.child});
+  const UpdateGate({super.key, required this.child, this.fullUpdateTag});
 
   final Widget child;
+  final String? fullUpdateTag;
 
   @override
   State<UpdateGate> createState() => _UpdateGateState();
@@ -33,11 +34,20 @@ class _UpdateGateState extends State<UpdateGate> {
     // 让首屏加载与字幕/封面请求先跑，别抢带宽，也别盖住启动动画。
     await Future<void>.delayed(const Duration(seconds: 3));
     if (!mounted || _prompted) return;
-    final release = await UpdateService().check();
+    final AppRelease? release;
+    try {
+      release = await UpdateService().check();
+    } on UpdateCheckException {
+      return;
+    }
     if (!mounted || release == null) return;
     _prompted = true;
     AppLog.i('update', '提示更新到 v${release.version}');
-    await showUpdateDialog(context, release);
+    await showUpdateDialog(
+      context,
+      release,
+      fallbackToFull: widget.fullUpdateTag == release.tag,
+    );
   }
 
   @override

@@ -2244,9 +2244,7 @@ class SettingsPageState extends State<SettingsPage> {
                           children: [
                             FilledButton.tonalIcon(
                               onPressed: () => launchUrl(
-                                Uri.parse(
-                                  'https://github.com/yagami-hue/MisaTV',
-                                ),
+                                Uri.parse('https://github.com/$kGithubRepo'),
                               ),
                               icon: const Icon(
                                 Icons.open_in_new_rounded,
@@ -2277,7 +2275,15 @@ class SettingsPageState extends State<SettingsPage> {
   /// 手动检查更新：没有新版本就给一条提示，有就直接弹更新框。
   Future<void> _checkUpdates(BuildContext context) async {
     _settingsSnack(context, '正在检查更新…');
-    final release = await UpdateService().check();
+    final AppRelease? release;
+    try {
+      release = await UpdateService().check();
+    } on UpdateCheckException {
+      if (context.mounted) {
+        _settingsSnack(context, '检查更新失败，请检查网络后重试。');
+      }
+      return;
+    }
     if (!context.mounted) return;
     if (release == null) {
       _settingsSnack(context, '已经是最新版本（v$kAppVersion）');

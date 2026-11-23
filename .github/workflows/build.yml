@@ -82,6 +82,9 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: 验证 Windows 差异更新和回滚
+        run: python -B tool/test_windows_delta.py -v
+
       - name: 准备内置 JVM / 加固壳 / Python / Yaozhi MPV
         shell: pwsh
         run: ./tool/prepare_windows_runtimes.ps1 -PythonIndex https://pypi.org/simple/
@@ -119,7 +122,7 @@ jobs:
           if (-not (Test-Path $src)) { throw "构建产物不存在：$src" }
           $runtimeManifest = Get-Content -Raw "$src/runtimes/ready.json" | ConvertFrom-Json
           $required = @(
-            'MisaTV.exe', 'data/flutter_assets/AssetManifest.bin', 'runtimes/ready.json',
+            'MisaTV.exe', 'apply_windows_delta.ps1', 'data/flutter_assets/AssetManifest.bin', 'runtimes/ready.json',
             "runtimes/jvm/$($runtimeManifest.jvm)/bundle.json",
             "runtimes/jvm/native/$($runtimeManifest.guard)/bundle.json",
             "runtimes/python/$($runtimeManifest.python)/bundle.json",
@@ -141,12 +144,27 @@ jobs:
           } finally {
             $archive.Dispose()
           }
+          $lite = 'MisaTV-windows-x64-lite.zip'
+          $liteFiles = $files | Where-Object Name -ne 'runtimes'
+          Compress-Archive -LiteralPath $liteFiles.FullName -DestinationPath $lite -CompressionLevel Optimal -Force
+          $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $lite).Path)
+          try {
+            $entries = $archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') }
+            if ($entries -match '(^|/)userdata(/|$)|^runtimes(/|$)') { throw '轻量包含有 userdata 或 runtimes' }
+            foreach ($file in $required | Where-Object { $_ -notlike 'runtimes/*' }) {
+              if ($file -notin $entries) { throw "轻量包缺少文件：$file" }
+            }
+          } finally {
+            $archive.Dispose()
+          }
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: MisaTV-windows-x64
-          path: MisaTV-windows-x64.zip
+          path: |
+            MisaTV-windows-x64.zip
+            MisaTV-windows-x64-lite.zip
           if-no-files-found: error
           retention-days: 14
 

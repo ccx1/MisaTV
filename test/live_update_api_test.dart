@@ -14,14 +14,16 @@ void main() {
 
   // 真实接口连通性：有 release 的仓库要能解析出版本与资产（离线属环境问题）。
   test('真实 GitHub release 接口可用', () async {
-    final release = await UpdateService(repo: 'microsoft/vscode').latest();
-    if (release == null) {
-      // 离线环境不算逻辑失败：跳过而不是红灯，联网时这段会真正跑一遍。
-      markTestSkipped('当前离线，跳过真实接口校验');
+    final AppRelease? release;
+    try {
+      release = await UpdateService(repo: 'microsoft/vscode').latest();
+    } on UpdateCheckException {
+      markTestSkipped('更新接口不可用，跳过真实接口校验');
       return;
     }
+    expect(release, isNotNull);
     expect(
-      UpdateService.looksLikeVersionTag(release.tag),
+      UpdateService.looksLikeVersionTag(release!.tag),
       isTrue,
       reason: 'tag=${release.tag}',
     );

@@ -8,6 +8,13 @@ class UpdateDownloadCancelled implements Exception {
 
 /// Web 版不支持应用内更新下载（浏览器无法替换正在运行的前端资源）。
 class UpdateDownloader {
+  static Future<bool> tryWindowsDelta(
+    AppRelease release, {
+    required void Function(int received, int total) onProgress,
+    required void Function() onPreparing,
+    bool Function()? isCancelled,
+  }) async => false;
+
   static Future<String> download(
     AppRelease release, {
     required void Function(int received, int total) onProgress,

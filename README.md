@@ -84,12 +84,14 @@ Flutter 重写，单进程、无账号、无遥测，数据只保存在本机。
 - [X] WebDAV 只读直连（OpenList / AList / Nextcloud / 群晖 / 坚果云）
 - [X] 内容过滤（R18 屏蔽，关闭需密码）、备份导出 / 导入、收藏 / 历史 / 搜索历史
 - [X] 外观：浅色 / 深色 / 跟随系统、5 种主题色、响应式布局、沉浸观影模式
-- [X] 桌面细节：自绘无边框标题栏、老板键 / 托盘、播放时阻止休眠、鼠标静止自动隐藏光标与控制栏
+- [X] 桌面细节：自绘无边框标题栏、老板键 / 托盘、播放时阻止休眠、移动鼠标唤出播放控制栏，静止后自动隐藏
 - [ ] 音频源码直通（SPDIF / HDMI 比特流）、超分辨率 —— libmdk 未提供对应接口，不做假开关
 
 ## 下载
 
 通过本 fork 的 [Releases](https://github.com/ccx1/MisaTV/releases/latest) 下载。
+
+MisaTV 启动后会检查更新。GitHub 请求失败时会尝试通过 `gh-proxy.com` 获取版本信息。也可以在「设置 → 安全与关于 → 关于」手动检查。
 
 <a href="https://github.com/ccx1/MisaTV/releases">
   <img src="https://img.shields.io/badge/Download-Latest_Release-2E9629?style=for-the-badge&logo=github" alt="Get it on Github" height="40"/>
@@ -101,6 +103,7 @@ Flutter 重写，单进程、无账号、无遥测，数据只保存在本机。
 - 安装目录不可写（如 Program Files）时自动回落到 `%APPDATA%\com.kniephos\MisaTV`。
 - 首次运行请先阅读并同意使用声明，再到「设置」页导入你自己的站源 / 直播源。
 - JVM、加固壳支持、Python（含依赖库）与 Yaozhi MPV 已随 Windows 完整包提供，首次启动从本地初始化，无需另行下载或安装；设置页显示「已内置」。MPV 可在播放页切换使用。
+- 支持差异更新的 Windows 版本点击「下载」后，会优先使用匹配版本和包型的差异包。校验通过后应用会退出、替换文件并重启，保留 `userdata/`。没有匹配的差异包或差异更新失败时，会继续下载完整包。
 
 ## Q&A
 

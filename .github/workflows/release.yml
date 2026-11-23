@@ -20,6 +20,7 @@ jobs:
     outputs:
       tag: ${{ steps.version.outputs.tag }}
       publish: ${{ steps.version.outputs.publish }}
+      base-tag: ${{ steps.version.outputs.base-tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -43,8 +44,11 @@ jobs:
           tag="v$app_version"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-          published_tags=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-            --jq '.[] | select(.draft == false) | .tag_name')
+          releases=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100")
+          published_tags=$(jq -r '.[] | select(.draft == false) | .tag_name' <<< "$releases")
+          stable_tags=$(jq -r '.[] | select(.draft == false and .prerelease == false) | .tag_name' <<< "$releases")
+          base_tag=$(printf '%s\n' "$stable_tags" | { grep -Ex "v$fork_version" || true; } | sort -V | tail -n 1)
+          echo "base-tag=$base_tag" >> "$GITHUB_OUTPUT"
           if grep -Fxq -- "$tag" <<< "$published_tags"; then
             echo "publish=false" >> "$GITHUB_OUTPUT"
             echo "::notice::$tag 已发布，本次生成 Windows 构建产物"
@@ -81,18 +85,45 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ needs.version.outputs.tag }}
+      BASE_TAG: ${{ needs.version.outputs.base-tag }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
       - uses: actions/download-artifact@v4
         with:
           path: release-assets
+
+      - name: 生成 Windows 差异包
+        if: env.BASE_TAG != ''
+        working-directory: release-assets
+        run: |
+          mkdir -p baseline
+          previous_assets=$(gh release view "$BASE_TAG" --json assets --jq '.assets[].name')
+          for name in MisaTV-windows-x64.zip MisaTV-windows-x64-lite.zip; do
+            if grep -Fxq -- "$name" <<< "$previous_assets"; then
+              gh release download "$BASE_TAG" --pattern "$name" --dir baseline
+              python ../tool/build_windows_delta.py \
+                --base "baseline/$name" --target "MisaTV-windows-x64/$name" \
+                --from "$BASE_TAG" --to "$RELEASE_TAG"
+            fi
+          done
 
       - name: 发布安装包和 SHA-256
         working-directory: release-assets
         run: |
           mv MisaTV-windows-x64/MisaTV-windows-x64.zip .
+          mv MisaTV-windows-x64/MisaTV-windows-x64-lite.zip .
           mv MisaTV-macos-arm64/MisaTV-macos-arm64.zip .
           mv misatv-android/build/app/outputs/flutter-apk/app-release.apk MisaTV-android-arm64.apk
-          assets=(MisaTV-windows-x64.zip MisaTV-android-arm64.apk MisaTV-macos-arm64.zip)
+          shopt -s nullglob
+          assets=(MisaTV-windows-x64.zip MisaTV-windows-x64-lite.zip
+            MisaTV-android-arm64.apk MisaTV-macos-arm64.zip MisaTV-delta-x64-*.zip)
           sha256sum "${assets[@]}" > SHA256SUMS.txt
 
           release=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \

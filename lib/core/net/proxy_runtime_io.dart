@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:http/io_client.dart';
+
 import '../../services/artwork/tmdb_network.dart';
 import '../logging/app_log.dart';
 import 'proxy_config.dart';
@@ -189,6 +191,9 @@ class ProxyRuntime {
     _overridesInstalled = true;
     HttpOverrides.global = ProxyHttpOverrides();
   }
+
+  static IOClient createDirectHttpClient() =>
+      IOClient(HttpClient()..findProxy = (_) => 'DIRECT');
 
   /// 代理自检：给设置页一个「到底哪层坏了」的结论，而不是让用户猜。
   Future<List<String>> diagnose() async {

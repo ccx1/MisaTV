@@ -1,3 +1,5 @@
+import 'package:http/http.dart' as http;
+
 import 'proxy_config.dart';
 
 /// Web 版占位：浏览器环境已经由系统/浏览器扩展代理，内置代理不生效。
@@ -21,6 +23,7 @@ class ProxyRuntime {
   static bool isLocalHost(String host) => false;
 
   static void installHttpOverrides() {}
+  static http.Client createDirectHttpClient() => http.Client();
 
   Future<List<String>> diagnose() async => const ['Web 版不支持代理自检'];
 

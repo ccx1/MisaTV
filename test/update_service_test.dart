@@ -1,7 +1,11 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
 import 'package:kniephos/core/app_version.dart';
+import 'package:kniephos/core/net/app_http.dart';
 import 'package:kniephos/services/update/update_service.dart';
 
 Map<String, Object?> asset(
@@ -11,6 +15,118 @@ Map<String, Object?> asset(
 }) => {'name': name, 'browser_download_url': url, 'size': size};
 
 void main() {
+  const relayUrl = 'https://gh-proxy.com/${UpdateService.latestUrl}';
+
+  test('GitHub 正常返回已安装版本时无需请求中转', () async {
+    final service = UpdateService(
+      http: AppHttp(
+        client: MockClient((request) async {
+          expect(request.url.toString(), UpdateService.latestUrl);
+          return http.Response(jsonEncode({'tag_name': 'v$kAppVersion'}), 200);
+        }),
+      ),
+      createRelayClient: () => throw TestFailure('不应创建中转客户端'),
+    );
+
+    expect(await service.check(), isNull);
+  });
+
+  test('GitHub 无最新发布时继续检查原仓库的标签', () async {
+    final service = UpdateService(
+      http: AppHttp(
+        client: MockClient((request) async {
+          return switch (request.url.pathSegments.last) {
+            'latest' => http.Response('', 404),
+            'releases' => http.Response('[]', 200),
+            'tags' => http.Response('[{"name":"v99.0.0.1"}]', 200),
+            _ => throw TestFailure('意外请求 ${request.url}'),
+          };
+        }),
+      ),
+      createRelayClient: () => throw TestFailure('不应创建中转客户端'),
+    );
+
+    expect((await service.check())?.version, '99.0.0.1');
+  });
+
+  test('代理连接失败时改走中转，更新链接只使用原仓库', () async {
+    const downloadPrefix =
+        'https://github.com/$kGithubRepo/releases/download/v99.0.0.1';
+    const zip = 'MisaTV-windows-x64.zip';
+    final service = UpdateService(
+      http: AppHttp(
+        client: MockClient((request) async {
+          expect(request.url.toString(), UpdateService.latestUrl);
+          throw const SocketException('代理连接失败');
+        }),
+      ),
+      createRelayClient: () => MockClient((request) async {
+        expect(request.url.toString(), relayUrl);
+        expect(request.headers['User-Agent'], 'MisaTV-updater');
+        expect(request.headers.containsKey('Authorization'), isFalse);
+        return http.Response(
+          jsonEncode({
+            'tag_name': 'v99.0.0.1',
+            'body': '发布说明',
+            'html_url': 'https://example.com/fake-release',
+            'assets': [
+              asset('fake-windows.zip', url: 'https://example.com/fake.zip'),
+              asset(
+                'MisaTV-macos.zip',
+                url: 'https://github.com/other/repo/releases/download/v99.0.0.1/MisaTV-macos.zip',
+              ),
+              asset(zip, url: '$downloadPrefix/$zip'),
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      }),
+    );
+
+    final release = await service.check();
+    expect(release?.notes, '发布说明');
+    expect(
+      release?.htmlUrl,
+      'https://github.com/$kGithubRepo/releases/tag/v99.0.0.1',
+    );
+    expect(release?.downloadUrl, '$downloadPrefix/$zip');
+  });
+
+  test('GitHub 和中转都未给出有效响应时报告检查失败', () async {
+    final service = UpdateService(
+      http: AppHttp(client: MockClient((_) async => http.Response('', 502))),
+      createRelayClient: () => MockClient((request) async {
+        expect(request.url.toString(), relayUrl);
+        return http.Response('{"message":"API rate limit exceeded"}', 200);
+      }),
+    );
+
+    await expectLater(service.check(), throwsA(isA<UpdateCheckException>()));
+  });
+
+  test('只选择匹配当前版本和包型的差异包', () {
+    const tag = 'v99.0.0.1';
+    const base = 'https://github.com/$kGithubRepo/releases/download/$tag';
+    const full = 'MisaTV-delta-x64-full-v$kAppVersion-to-$tag.zip';
+    const lite = 'MisaTV-delta-x64-lite-v$kAppVersion-to-$tag.zip';
+    final digest = 'sha256:${'a' * 64}';
+    final release = UpdateService.parseGithubRelease({
+      'tag_name': tag,
+      'assets': [
+        {...asset(full, url: 'https://example.com/$full'), 'digest': digest},
+        {...asset(lite, url: '$base/$lite'), 'digest': 'missing'},
+        {...asset(full, url: '$base/$full'), 'digest': digest},
+        asset('MisaTV-windows-x64-lite.zip'),
+        asset('MisaTV-windows-x64.zip'),
+      ],
+    });
+    expect(release.windowsDeltas.keys, ['full']);
+    expect(release.windowsDeltas['full']?.url, '$base/$full');
+    expect(release.assetName, 'MisaTV-windows-x64.zip');
+    expect(UpdateService.pickAsset([asset(full)]), isNull);
+  });
+
   test('版本号归一：去掉 v 前缀与构建号', () {
     expect(UpdateService.normalizeVersion('v0.9.1'), '0.9.1');
     expect(UpdateService.normalizeVersion('  V1.2.3 '), '1.2.3');
@@ -34,7 +150,10 @@ void main() {
     expect(UpdateService.compareVersions('1.2.1000', '1.2.3'), greaterThan(0));
     expect(UpdateService.compareVersions('1.2.3', '1.2.1000'), lessThan(0));
     // minor 超过 1000 同理。
-    expect(UpdateService.compareVersions('1.1000.0', '1.3.999'), greaterThan(0));
+    expect(
+      UpdateService.compareVersions('1.1000.0', '1.3.999'),
+      greaterThan(0),
+    );
     // 正常进位：0.10.0 > 0.9.9（字符串比较会判错，这里必须走数值）。
     expect(UpdateService.compareVersions('0.10.0', '0.9.10'), greaterThan(0));
   });
@@ -45,14 +164,26 @@ void main() {
     expect(UpdateService.isNewer('v1.3.0.1', '1.2.0.10'), isTrue);
     expect(UpdateService.compareVersions('1', '1.0.0'), 0);
     // 非数字段按 0 处理，不抛异常。
-    expect(() => UpdateService.compareVersions('abc', '1.0.0'), returnsNormally);
+    expect(
+      () => UpdateService.compareVersions('abc', '1.0.0'),
+      returnsNormally,
+    );
     expect(UpdateService.compareVersions('', '0.0.0'), 0);
   });
 
   test('版本比较：预发布标记', () {
-    expect(UpdateService.compareVersions('1.0.0-alpha', '1.0.0-beta'), lessThan(0));
-    expect(UpdateService.compareVersions('1.0.0-beta.2', '1.0.0-beta.1'), greaterThan(0));
-    expect(UpdateService.compareVersions('1.0.0', '1.0.0-beta'), greaterThan(0));
+    expect(
+      UpdateService.compareVersions('1.0.0-alpha', '1.0.0-beta'),
+      lessThan(0),
+    );
+    expect(
+      UpdateService.compareVersions('1.0.0-beta.2', '1.0.0-beta.1'),
+      greaterThan(0),
+    );
+    expect(
+      UpdateService.compareVersions('1.0.0', '1.0.0-beta'),
+      greaterThan(0),
+    );
   });
 
   test('构建号不参与比较（产品决策：只改 +N 不发更新提示）', () {
@@ -119,6 +250,9 @@ void main() {
       multiLine: true,
     ).firstMatch(pubspec);
     expect(match, isNotNull);
-    expect(kAppVersion, matches('^${RegExp.escape(match!.group(1)!)}\\.[1-9][0-9]*\$'));
+    expect(
+      kAppVersion,
+      matches('^${RegExp.escape(match!.group(1)!)}\\.[1-9][0-9]*\$'),
+    );
   });
 }

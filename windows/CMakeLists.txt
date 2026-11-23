@@ -107,6 +107,9 @@ install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
 
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/../tool/apply_windows_delta.ps1"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}" COMPONENT Runtime)
+
 # 在构建机器准备第三方运行时，发布包离线可用，不混入 userdata。
 set(BUNDLED_RUNTIMES "${CMAKE_CURRENT_SOURCE_DIR}/../assets/windows-runtimes")
 if(EXISTS "${BUNDLED_RUNTIMES}/ready.json")

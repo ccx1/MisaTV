@@ -9,17 +9,27 @@ import '../../services/update/update_download.dart';
 import '../../services/update/update_service.dart';
 
 /// 弹出「发现新版本」对话框：看更新内容，然后下载 / 走网盘 / 稍后提醒。
-Future<void> showUpdateDialog(BuildContext context, AppRelease release) {
+Future<void> showUpdateDialog(
+  BuildContext context,
+  AppRelease release, {
+  bool fallbackToFull = false,
+}) {
   return showDialog<void>(
     context: context,
-    builder: (ctx) => UpdateDialog(release: release),
+    builder: (ctx) =>
+        UpdateDialog(release: release, fallbackToFull: fallbackToFull),
   );
 }
 
 class UpdateDialog extends StatefulWidget {
-  const UpdateDialog({super.key, required this.release});
+  const UpdateDialog({
+    super.key,
+    required this.release,
+    this.fallbackToFull = false,
+  });
 
   final AppRelease release;
+  final bool fallbackToFull;
 
   @override
   State<UpdateDialog> createState() => _UpdateDialogState();
@@ -28,6 +38,7 @@ class UpdateDialog extends StatefulWidget {
 class _UpdateDialogState extends State<UpdateDialog> {
   bool _downloading = false;
   bool _cancelRequested = false;
+  String? _downloadStatus;
   int _received = 0;
   int _total = 0;
   String? _error;
@@ -35,6 +46,16 @@ class _UpdateDialogState extends State<UpdateDialog> {
 
   AppRelease get _release => widget.release;
   bool get _canDownload => _release.downloadUrl.trim().isNotEmpty;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.fallbackToFull) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _startDownload();
+      });
+    }
+  }
 
   Future<void> _open(String url) async {
     final messenger = ScaffoldMessenger.maybeOf(context);
@@ -62,20 +83,44 @@ class _UpdateDialogState extends State<UpdateDialog> {
       _cancelRequested = false;
       _received = 0;
       _total = _release.assetSize;
+      _downloadStatus = widget.fallbackToFull ? '差异更新失败，正在下载完整包' : null;
       _error = null;
       _savedPath = null;
     });
     try {
+      bool isCancelled() => !mounted || _cancelRequested;
+      void onProgress(int received, int total) {
+        if (!mounted) return;
+        setState(() {
+          _received = received;
+          if (total > 0) _total = total;
+        });
+      }
+
+      if (!widget.fallbackToFull) {
+        final scheduled = await UpdateDownloader.tryWindowsDelta(
+          _release,
+          onProgress: (received, total) {
+            if (!mounted) return;
+            setState(() => _downloadStatus = '正在下载差异更新包');
+            onProgress(received, total);
+          },
+          onPreparing: () {
+            if (mounted) setState(() => _downloadStatus = '正在校验差异更新，完成后将重启');
+          },
+          isCancelled: isCancelled,
+        );
+        if (scheduled) return;
+        if (isCancelled()) throw const UpdateDownloadCancelled();
+        if (_downloadStatus != null) {
+          setState(() => _downloadStatus = '差异更新失败，正在下载完整包');
+        }
+      }
+      onProgress(0, _release.assetSize);
       final path = await UpdateDownloader.download(
         _release,
-        onProgress: (received, total) {
-          if (!mounted) return;
-          setState(() {
-            _received = received;
-            if (total > 0) _total = total;
-          });
-        },
-        isCancelled: () => _cancelRequested,
+        onProgress: onProgress,
+        isCancelled: isCancelled,
       );
       if (!mounted) return;
       setState(() {
@@ -118,7 +163,9 @@ class _UpdateDialogState extends State<UpdateDialog> {
 
   Widget _progress(ThemeData theme) {
     final ratio = _total > 0 ? (_received / _total).clamp(0.0, 1.0) : null;
-    final percent = ratio == null ? '' : ' · ${(ratio * 100).toStringAsFixed(0)}%';
+    final percent = ratio == null
+        ? ''
+        : ' · ${(ratio * 100).toStringAsFixed(0)}%';
     final size = _total > 0
         ? '${_formatBytes(_received)} / ${_formatBytes(_total)}$percent'
         : '已下载 ${_formatBytes(_received)}';
@@ -144,9 +191,7 @@ class _UpdateDialogState extends State<UpdateDialog> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final notes = _release.notes.isEmpty
-        ? '本次发布没有填写更新说明。'
-        : _release.notes;
+    final notes = _release.notes.isEmpty ? '本次发布没有填写更新说明。' : _release.notes;
     final savedPath = _savedPath;
     return AlertDialog(
       title: Row(
@@ -184,6 +229,11 @@ class _UpdateDialogState extends State<UpdateDialog> {
                 ),
               ),
             ),
+            if (_downloading && _downloadStatus != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(_downloadStatus!),
+              ),
             if (_downloading) _progress(theme),
             if (_error != null)
               Padding(
@@ -245,18 +295,13 @@ class _UpdateDialogState extends State<UpdateDialog> {
             label: const Text('打开文件夹'),
           )
         else if (_downloading)
-          const FilledButton(
-            onPressed: null,
-            child: Text('下载中…'),
-          )
+          const FilledButton(onPressed: null, child: Text('下载中…'))
         else
           FilledButton.icon(
             onPressed: _startDownload,
             icon: const Icon(Icons.download_rounded, size: 18),
             label: Text(
-              !_canDownload
-                  ? '打开发布页'
-                  : (_error == null ? '下载' : '重试下载'),
+              !_canDownload ? '打开发布页' : (_error == null ? '下载' : '重试下载'),
             ),
           ),
       ],

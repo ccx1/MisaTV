@@ -196,12 +196,16 @@ jar 系蜘蛛**不读 `ext` 里的网盘凭据**，必须由应用主动落盘�
 
 启动后 `UpdateGate` 会请求 GitHub 的 `/releases/latest`，只有远端版本高于
 `kAppVersion`（`lib/core/app_version.dart`）才弹窗，第四段 fork 修订号参与比较。
-三个按钮分别是【下载】（打开 release 里的 Windows zip 资产，
-没有资产就打开 release 页面）、【网盘下载】（123 云盘固定地址）、【稍后提醒】
-（什么都不持久化，所以下次启动还会再弹）。仓库没有 release 时会退回 release 列表、
-再退回 tag，且只认版本形状的 tag（`v0.9.1`）。
+【下载】会优先尝试匹配当前版本和包型的 Windows 差异包，再按既有流程下载完整 ZIP。没有资产时打开 Release 页面。
+【网盘下载】打开固定的 123 云盘地址。【稍后提醒】会在下次启动时再次检查。
+仓库没有 Release 时会退回 Release 列表和版本标签。
 
-应用默认从 `ccx1/MisaTV` 获取该 fork 的更新。调试弹窗可以用
+差异包使用 GitHub 资产的 SHA-256 校验。安装脚本先确认基线文件并解包到安装目录中的暂存区，
+等主窗口按现有关窗流程退出后再替换文件，保留 `userdata/`。替换失败时，脚本恢复已替换的文件，
+再重启旧版进入完整包下载。没有差异包、安装位置不可写或基线校验失败时，当前窗口直接进入完整包下载。
+
+应用默认从 `ccx1/MisaTV` 获取该 fork 的更新。GitHub 请求失败时直接连接 `gh-proxy.com` 获取最新发布信息。两条线路都失败时，手动检查显示失败提示。
+调试弹窗可以用
 `flutter build windows --release --dart-define=MISA_UPDATE_REPO=microsoft/vscode`
 把检查指向别的仓库。
 
@@ -214,9 +218,11 @@ jar 系蜘蛛**不读 `ext` 里的网盘凭据**，必须由应用主动落盘�
 Flutter 的 `pubspec.yaml` 保持 `X.Y.Z+N` 格式，前三段与 `kAppVersion` 一致，
 平台构建编号 `N` 随每次新发布递增。流水线校验版本并在各平台构建成功后公开 Release。
 
-Release 提供 Windows x64 完整包、Android arm64 APK、macOS arm64 ZIP 和
-`SHA256SUMS.txt`。同一版本后续推送运行 Windows 检查及构建，产物可从 Actions 下载，
-已发布的版本及资产保持原样。
+Release 提供 Windows x64 完整包、轻量包、Android arm64 APK、macOS arm64 ZIP 和
+`SHA256SUMS.txt`。发布任务下载上一个正式版本中同包型的 Windows ZIP，按文件 SHA-256 生成
+`MisaTV-delta-x64-<full|lite>-<旧标签>-to-<新标签>.zip`，包含新增和变更文件以及删除清单，
+并把差异包一并纳入校验列表。没有对应基线的包型首次只发布整包。跨过基线版本的客户端走整包下载。
+同一版本后续推送运行 Windows 检查及构建，产物可从 Actions 下载，已发布的版本及资产保持原样。
 
 ## Windows 渲染与内存
 
