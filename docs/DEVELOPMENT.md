@@ -195,8 +195,8 @@ jar 系蜘蛛**不读 `ext` 里的网盘凭据**，必须由应用主动落盘�
 ### 检查更新
 
 启动后 `UpdateGate` 会请求 GitHub 的 `/releases/latest`，只有远端版本高于
-`kAppVersion`（`lib/core/app_version.dart`，与 `pubspec.yaml` 的 `version` 保持一致，
-有测试守护）才弹窗，三个按钮分别是【下载】（打开 release 里的 Windows zip 资产，
+`kAppVersion`（`lib/core/app_version.dart`）才弹窗，第四段 fork 修订号参与比较。
+三个按钮分别是【下载】（打开 release 里的 Windows zip 资产，
 没有资产就打开 release 页面）、【网盘下载】（123 云盘固定地址）、【稍后提醒】
 （什么都不持久化，所以下次启动还会再弹）。仓库没有 release 时会退回 release 列表、
 再退回 tag，且只认版本形状的 tag（`v0.9.1`）。
@@ -208,10 +208,11 @@ jar 系蜘蛛**不读 `ext` 里的网盘凭据**，必须由应用主动落盘�
 ### GitHub 自动发布
 
 将发布提交推送到 `main`，或在 GitHub Actions 对 `main` 手动运行 **Build and publish Release**。
-发布版本取自 `pubspec.yaml` 中的 `X.Y.Z+N`，其中 `X.Y.Z` 应与
-`lib/core/app_version.dart` 的 `kAppVersion` 一致。准备新版本时同时更新这两个文件，
-并递增构建编号 `N`。例如从 `1.2.0+13` 升至 `1.3.0+14`，应用版本填 `1.3.0`，
-流水线会在构建全部成功后公开 `v1.3.0` 的 Release。
+发布版本取自 `lib/core/app_version.dart` 的 `kAppVersion`，格式为 `X.Y.Z.R`。
+`X.Y.Z` 是所基于的官方版本。首次发布从 `R = 1` 开始，同一官方版本内递增第四段。
+例如基于官方 `1.2.0` 依次发布 `v1.2.0.1`、`v1.2.0.2`，跟进官方 `1.3.0` 后从 `v1.3.0.1` 开始。
+Flutter 的 `pubspec.yaml` 保持 `X.Y.Z+N` 格式，前三段与 `kAppVersion` 一致，
+平台构建编号 `N` 随每次新发布递增。流水线校验版本并在各平台构建成功后公开 Release。
 
 Release 提供 Windows x64 完整包、Android arm64 APK、macOS arm64 ZIP 和
 `SHA256SUMS.txt`。同一版本后续推送运行 Windows 检查及构建，产物可从 Actions 下载，

@@ -32,8 +32,12 @@ jobs:
         run: |
           pubspec_version=$(awk '$1 == "version:" {print $2}' pubspec.yaml)
           app_version=$(sed -nE "s/^const String kAppVersion = '([^']+)';/\1/p" lib/core/app_version.dart)
-          if [[ ! $pubspec_version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\+[1-9][0-9]*$ || "${pubspec_version%+*}" != "$app_version" ]]; then
-            echo "::error::pubspec.yaml 必须使用 X.Y.Z+N，且 X.Y.Z 必须等于 kAppVersion"
+          official_version='(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)'
+          fork_version="$official_version\.[1-9][0-9]*"
+          if [[ ! $pubspec_version =~ ^$official_version\+[1-9][0-9]*$ ||
+                ! $app_version =~ ^$fork_version$ ||
+                "${pubspec_version%+*}" != "${app_version%.*}" ]]; then
+            echo "::error::pubspec.yaml 必须使用 X.Y.Z+N，kAppVersion 必须使用同一官方版本的 X.Y.Z.R"
             exit 1
           fi
           tag="v$app_version"
@@ -45,6 +49,11 @@ jobs:
             echo "publish=false" >> "$GITHUB_OUTPUT"
             echo "::notice::$tag 已发布，本次生成 Windows 构建产物"
           else
+            latest_tag=$(printf '%s\n' "$published_tags" "$tag" | grep -Ex "v$fork_version" | sort -V | tail -n 1)
+            if [[ "$latest_tag" != "$tag" ]]; then
+              echo "::error::$tag 低于已发布的 $latest_tag，请提高 fork 版本"
+              exit 1
+            fi
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 

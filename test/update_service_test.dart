@@ -41,6 +41,8 @@ void main() {
 
   test('版本比较：多段 / 少段 / 脏数据都稳定', () {
     expect(UpdateService.compareVersions('1.2.3.4', '1.2.3'), greaterThan(0));
+    expect(UpdateService.isNewer('v1.2.0.10', '1.2.0.9'), isTrue);
+    expect(UpdateService.isNewer('v1.3.0.1', '1.2.0.10'), isTrue);
     expect(UpdateService.compareVersions('1', '1.0.0'), 0);
     // 非数字段按 0 处理，不抛异常。
     expect(() => UpdateService.compareVersions('abc', '1.0.0'), returnsNormally);
@@ -109,13 +111,14 @@ void main() {
     expect(UpdateService.pickAsset(const []), isNull);
   });
 
-  test('应用版本号与 pubspec 一致', () {
+  test('应用版本的前三段对应 pubspec 中的官方版本', () {
     final pubspec = File('pubspec.yaml').readAsStringSync();
+    const official = r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)';
     final match = RegExp(
-      r'^version:\s*([0-9.]+)',
+      '^version:[ \\t]*($official)\\+[1-9][0-9]*[ \\t\\r]*\$',
       multiLine: true,
     ).firstMatch(pubspec);
     expect(match, isNotNull);
-    expect(kAppVersion, match!.group(1));
+    expect(kAppVersion, matches('^${RegExp.escape(match!.group(1)!)}\\.[1-9][0-9]*\$'));
   });
 }
