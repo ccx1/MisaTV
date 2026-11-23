@@ -14,6 +14,8 @@ MisaTV 本体代码以 GPL-3.0 发布（见 [LICENSE](LICENSE)）。仓库里还
 | string-similarity | `assets/js_lib/similarity.js` | MIT，<https://github.com/aceakash/string-similarity> |
 | MCrypt 移植 | `lib/services/relay/m3u8_purify.dart` | 逐函数移植 TVBox `util/M3u8.java` 的 `purify()` 链（作者 asdfgh / FongMi），源码内已注明 |
 
+字幕 GBK 解码依赖 [charset](https://pub.dev/packages/charset)，使用 Apache-2.0 许可。
+
 `assets/js_lib/utils.js`、`assets/python_runner/`（`runner.py`、`base/spider.py`）、
 `assets/jvm/src/`（`SpiderHost.java`、`DexNative.java`、`MyCrypto.java`、`GoProxy.java`）
 以及 `assets/jvm/` 下的 `*.jar`（`stubs` 为 TVBox 接口兼容桩、其余为对应 Java 源构建的 shim）

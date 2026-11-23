@@ -6,7 +6,6 @@ import 'dart:convert';
 
 import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:gbk_codec/gbk_codec.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:kniephos/services/subtitle/subtitle.dart';
@@ -143,8 +142,8 @@ void main() {
       expect(SubtitleText.decode(bytes), '你好');
     });
 
-    test('非 UTF-8 → GB18030/GBK 兜底', () {
-      final bytes = gbk_bytes.encode('中文字幕测试');
+    test('非 UTF-8 → GBK 兜底', () {
+      const bytes = [214, 208, 206, 196, 215, 214, 196, 187, 178, 226, 202, 212];
       expect(utf8.decode(bytes, allowMalformed: true), isNot('中文字幕测试'));
       expect(SubtitleText.decode(bytes), '中文字幕测试');
     });

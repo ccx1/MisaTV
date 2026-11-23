@@ -21,6 +21,7 @@ dependencies:
   window_manager: ^0.5.2
   url_launcher: ^6.3.3
   gbk_codec: ^0.4.0
+  charset: ^2.0.1
   video_player: ^2.14.1
   fvp: ^0.39.1
   path_provider: ^2.1.6
