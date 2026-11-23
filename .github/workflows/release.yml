@@ -1,0 +1,119 @@
+name: Build and publish Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  version:
+    name: 校验发布版本
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: 读取版本并检查现有 Release
+        id: version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          pubspec_version=$(awk '$1 == "version:" {print $2}' pubspec.yaml)
+          app_version=$(sed -nE "s/^const String kAppVersion = '([^']+)';/\1/p" lib/core/app_version.dart)
+          if [[ ! $pubspec_version =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\+[1-9][0-9]*$ || "${pubspec_version%+*}" != "$app_version" ]]; then
+            echo "::error::pubspec.yaml 必须使用 X.Y.Z+N，且 X.Y.Z 必须等于 kAppVersion"
+            exit 1
+          fi
+          tag="v$app_version"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+          published_tags=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false) | .tag_name')
+          if grep -Fxq -- "$tag" <<< "$published_tags"; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$tag 已发布，本次生成 Windows 构建产物"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  windows:
+    needs: version
+    uses: ./.github/workflows/build.yml
+
+  android:
+    needs: version
+    if: needs.version.outputs.publish == 'true'
+    uses: ./.github/workflows/build-android.yml
+
+  macos:
+    needs: version
+    if: needs.version.outputs.publish == 'true'
+    uses: ./.github/workflows/build-macos.yml
+
+  publish:
+    name: 发布 ${{ needs.version.outputs.tag }}
+    needs: [version, windows, android, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.version.outputs.tag }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+
+      - name: 发布安装包和 SHA-256
+        working-directory: release-assets
+        run: |
+          mv MisaTV-windows-x64/MisaTV-windows-x64.zip .
+          mv MisaTV-macos-arm64/MisaTV-macos-arm64.zip .
+          mv misatv-android/build/app/outputs/flutter-apk/app-release.apk MisaTV-android-arm64.apk
+          assets=(MisaTV-windows-x64.zip MisaTV-android-arm64.apk MisaTV-macos-arm64.zip)
+          sha256sum "${assets[@]}" > SHA256SUMS.txt
+
+          release=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq -c --arg tag "$RELEASE_TAG" '.[] | select(.tag_name == $tag)')
+          if [[ -n "$release" ]]; then
+            if [[ $(jq -r '.draft' <<< "$release") == false ]]; then
+              echo "::notice::$RELEASE_TAG 已发布"
+              exit 0
+            fi
+            if [[ $(jq -r '.target_commitish' <<< "$release") != "$GITHUB_SHA" ]]; then
+              echo "::error::$RELEASE_TAG 的草稿指向其他提交"
+              exit 1
+            fi
+          fi
+
+          # --target 只会用于创建新标签，已有标签需先验证实际指向。
+          tag_refs=$(gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$RELEASE_TAG" \
+            | jq -r --arg ref "refs/tags/$RELEASE_TAG" '.[] | select(.ref == $ref) | .ref')
+          if [[ -n "$tag_refs" ]]; then
+            tag_commit=$(gh api "repos/$GITHUB_REPOSITORY/commits/$RELEASE_TAG" --jq '.sha')
+            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+              echo "::error::$RELEASE_TAG 已指向其他提交，请提高版本号"
+              exit 1
+            fi
+          fi
+
+          # 创建草稿后上传资产，所有上传成功才公开。重跑时继续同一提交的草稿。
+          if [[ -z "$release" ]]; then
+            gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" \
+              --title "MisaTV $RELEASE_TAG" --generate-notes --draft
+          fi
+          gh release upload "$RELEASE_TAG" "${assets[@]}" SHA256SUMS.txt --clobber
+          gh release edit "$RELEASE_TAG" --draft=false

@@ -1,8 +1,8 @@
 /// 应用版本号：与 `pubspec.yaml` 的 `version:` 保持一致（有测试守护）。
-const String kAppVersion = '1.2.0';
+const String kAppVersion = '1.3.0';
 
 /// 检查更新走的仓库。
-const String kGithubRepo = 'yagami-hue/MisaTV';
+const String kGithubRepo = 'ccx1/MisaTV';
 
 /// 更新弹窗里的「网盘下载」地址。
 const String kUpdateNetdiskUrl =

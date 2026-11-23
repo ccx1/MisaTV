@@ -3485,8 +3485,7 @@ class JarSpiderService {
     }
 
     // 内置真实实现（winbox `shell-shim/real/<壳名>.jar`）：纯 Java 快路径，
-    // 不挂 unidbg（模拟器在 x64 上对 ftyshinidie 系会崩在 toIntPeer(null)），
-    // 也不需要 payload/原生桥。
+    // 已有实现时不必启动 unidbg，也不需要 payload/原生桥。
     if (realShim != null) {
       final classpath = [
         p.join(jvmDir, 'shims', 'shell-shim.jar'),

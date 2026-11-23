@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import '../../core/logging/app_log.dart';
 import '../../core/net/download_mirrors.dart';
 import '../../core/net/runtime_fetch.dart';
+import '../bundled_runtime.dart';
 import 'jvm_runtime.dart';
 
 /// 加固壳（Guard / DexNative）支持：ARM 原生桥运行期。
@@ -62,6 +63,7 @@ class ArmBridgeRuntime {
     if (cached != null) return cached;
     final support = await getApplicationSupportDirectory();
     final dir = Directory(p.join(support.path, 'jvm', 'native', version));
+    await BundledRuntime.restore('jvm/native/$version', dir);
     _cachedDir = dir;
     return dir;
   }
@@ -73,7 +75,8 @@ class ArmBridgeRuntime {
     final cached = _cachedInstalled;
     if (cached != null) return cached;
     final dir = await _dir();
-    final ok = dir.existsSync() &&
+    final ok =
+        dir.existsSync() &&
         _jarPaths.every((rel) {
           final f = File(p.join(dir.path, rel.split('/').last));
           return f.existsSync() && f.lengthSync() > 1024;
@@ -86,13 +89,18 @@ class ArmBridgeRuntime {
   Future<List<String>> jarPaths() async {
     final dir = await _dir();
     if (!dir.existsSync()) return const [];
-    final files = dir
-        .listSync()
-        .whereType<File>()
-        .where((f) => f.path.toLowerCase().endsWith('.jar') && f.lengthSync() > 1024)
-        .map((f) => f.path)
-        .toList()
-      ..sort();
+    final files =
+        dir
+            .listSync()
+            .whereType<File>()
+            .where(
+              (f) =>
+                  f.path.toLowerCase().endsWith('.jar') &&
+                  f.lengthSync() > 1024,
+            )
+            .map((f) => f.path)
+            .toList()
+          ..sort();
     return files;
   }
 
@@ -122,6 +130,7 @@ class ArmBridgeRuntime {
     await JvmRuntime.instance.ensureInstalled();
     await JvmRuntime.instance.ensureBridgeJar();
     final dir = await _dir();
+    if (await installed()) return dir;
     dir.createSync(recursive: true);
     final http = RuntimeFetch.newClient();
     AppLog.i('arm-bridge', '开始安装加固壳运行时 → ${dir.path}');
@@ -133,8 +142,10 @@ class ArmBridgeRuntime {
         final name = rel.split('/').last;
         final file = File(p.join(dir.path, name));
         if (file.existsSync() && file.lengthSync() > 1024) continue;
-        _setProgress('下载加固壳运行时 $done/${_jarPaths.length}（$name）…',
-            (done - 1) / _jarPaths.length);
+        _setProgress(
+          '下载加固壳运行时 $done/${_jarPaths.length}（$name）…',
+          (done - 1) / _jarPaths.length,
+        );
         var lastError = '';
         var ok = false;
         for (final base in bases) {
@@ -170,9 +181,13 @@ class ArmBridgeRuntime {
   Future<List<String>> _rankedBases() async {
     _setProgress('测速选择最快的加固壳下载线路…', 0);
     final rel = _jarPaths.first;
-    final ranked = await rankMirrors(_mavenBases.map((base) => '$base$rel').toList());
+    final ranked = await rankMirrors(
+      _mavenBases.map((base) => '$base$rel').toList(),
+    );
     if (ranked.isEmpty) return _mavenBases;
-    return ranked.map((url) => url.substring(0, url.length - rel.length)).toList();
+    return ranked
+        .map((url) => url.substring(0, url.length - rel.length))
+        .toList();
   }
 
   Future<void> _download(HttpClient http, String url, File target) async {

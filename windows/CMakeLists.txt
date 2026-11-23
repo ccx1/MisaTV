@@ -106,3 +106,10 @@ install(DIRECTORY "${PROJECT_BUILD_DIR}/${FLUTTER_ASSET_DIR_NAME}"
 install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   CONFIGURATIONS Profile;Release
   COMPONENT Runtime)
+
+# 在构建机器准备第三方运行时，发布包离线可用，不混入 userdata。
+set(BUNDLED_RUNTIMES "${CMAKE_CURRENT_SOURCE_DIR}/../assets/windows-runtimes")
+if(EXISTS "${BUNDLED_RUNTIMES}/ready.json")
+  install(DIRECTORY "${BUNDLED_RUNTIMES}/"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}/runtimes" COMPONENT Runtime)
+endif()

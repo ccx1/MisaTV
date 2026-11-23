@@ -2,15 +2,35 @@ import 'package:flutter/material.dart';
 
 import '../../app.dart';
 import '../../models/site_config.dart';
+import '../../services/runtime_extension.dart';
 import 'empty_state.dart';
 import 'glass.dart';
 
 Future<void> showSourcePicker(BuildContext context) async {
-  await showModalBottomSheet(
+  final app = AppScope.of(context);
+  await app.refreshJarReady();
+  if (!context.mounted) return;
+  final site = await showModalBottomSheet<SourceBean>(
     context: context,
     isScrollControlled: true,
     builder: (ctx) => const _SourcePickerSheet(),
   );
+  if (site == null || !context.mounted) return;
+  if (site.isJarSpider && !app.jarReady) {
+    final result = await RuntimeInstallPrompt.instance.ensure(
+      RuntimeExtension.jvm,
+    );
+    if (!context.mounted) return;
+    if (result == RuntimePromptResult.ready) {
+      await app.refreshJarReady();
+    } else if (result != RuntimePromptResult.downloading) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text(result.messageFor(RuntimeExtension.jvm))),
+      );
+      return;
+    }
+  }
+  await app.setActiveSite(site.key);
 }
 
 class _SourcePickerSheet extends StatefulWidget {
@@ -83,9 +103,7 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
               _PickerChips(
                 label: '点播订阅',
                 activeId: app.activeProfileId ?? '',
-                options: [
-                  for (final p in app.vodProfiles) (p.id, p.name),
-                ],
+                options: [for (final p in app.vodProfiles) (p.id, p.name)],
                 onTap: app.activateProfile,
               ),
               const SizedBox(height: 10),
@@ -145,13 +163,10 @@ class _SourcePickerSheetState extends State<_SourcePickerSheet> {
                           site: filtered[i],
                           active: filtered[i].key == activeSite?.key,
                           usable: app.isSiteUsable(filtered[i]),
-                          onTap: app.isSiteUsable(filtered[i])
-                              ? () async {
-                                  await app.setActiveSite(filtered[i].key);
-                                  if (context.mounted) {
-                                    Navigator.of(context).pop();
-                                  }
-                                }
+                          onTap:
+                              app.isSiteUsable(filtered[i]) ||
+                                  filtered[i].isJarSpider
+                              ? () => Navigator.of(context).pop(filtered[i])
                               : null,
                         ),
                       ],
@@ -213,7 +228,13 @@ class _PickerChips extends StatelessWidget {
 }
 
 class _SiteTile extends StatelessWidget {
-  const _SiteTile({super.key, required this.site, required this.active, required this.usable, this.onTap});
+  const _SiteTile({
+    super.key,
+    required this.site,
+    required this.active,
+    required this.usable,
+    this.onTap,
+  });
   final SourceBean site;
   final bool active;
   final bool usable;
@@ -236,14 +257,18 @@ class _SiteTile extends StatelessWidget {
               height: 38,
               alignment: Alignment.center,
               decoration: BoxDecoration(
-                color: theme.colorScheme.primary.withValues(alpha: usable ? 0.16 : 0.06),
+                color: theme.colorScheme.primary.withValues(
+                  alpha: usable ? 0.16 : 0.06,
+                ),
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Text(
                 site.displayName.characters.first,
                 style: TextStyle(
                   fontWeight: FontWeight.w800,
-                  color: usable ? theme.colorScheme.primary : theme.disabledColor,
+                  color: usable
+                      ? theme.colorScheme.primary
+                      : theme.disabledColor,
                 ),
               ),
             ),
@@ -259,23 +284,39 @@ class _SiteTile extends StatelessWidget {
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: theme.textTheme.labelSmall?.copyWith(
-                      color: theme.colorScheme.onSurface.withValues(alpha: 0.70),
+                      color: theme.colorScheme.onSurface.withValues(
+                        alpha: 0.70,
+                      ),
                     ),
                   ),
                   if (!usable)
                     Text(
-                      site.unsupportedReason,
+                      site.isJarSpider && RuntimeExtension.jvm.supported
+                          ? '需要 JVM 运行时，点击下载安装'
+                          : site.unsupportedReason,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.labelSmall?.copyWith(color: theme.colorScheme.error),
+                      style: theme.textTheme.labelSmall?.copyWith(
+                        color: theme.colorScheme.error,
+                      ),
                     ),
                 ],
               ),
             ),
             if (active)
-              Icon(Icons.check_circle_rounded, color: theme.colorScheme.primary, size: 22)
+              Icon(
+                Icons.check_circle_rounded,
+                color: theme.colorScheme.primary,
+                size: 22,
+              )
             else if (!usable)
-              Icon(Icons.block_rounded, color: theme.disabledColor, size: 20),
+              Icon(
+                site.isJarSpider && RuntimeExtension.jvm.supported
+                    ? Icons.download_rounded
+                    : Icons.block_rounded,
+                color: theme.disabledColor,
+                size: 20,
+              ),
           ],
         ),
       ),

@@ -42,7 +42,7 @@ extension RuntimeExtensionInfo on RuntimeExtension {
   Future<bool> installed() async {
     if (!supported) return false;
     return switch (this) {
-      RuntimeExtension.jvm => JvmRuntime.instance.installed(),
+      RuntimeExtension.jvm => JvmRuntime.instance.installed(refresh: true),
       RuntimeExtension.guard => ArmBridgeRuntime.instance.installed(),
       RuntimeExtension.python => PyRuntime.instance.installed(),
     };

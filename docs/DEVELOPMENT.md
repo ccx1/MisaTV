@@ -135,9 +135,21 @@ JVM 里的 jar 蜘蛛（自带 OkHttp）与 JS 蜘蛛的 curl 子进程——这
 | 类型 | 实现要点 |
 | --- | --- |
 | `.js` | QuickJS 在独立 isolate 执行，`req()` 由 curl 子进程提供同步语义；脚本落盘缓存 6 小时，断网回退旧缓存。超时**不能**用 `Isolate.immediate` 强杀（会把原生 runtime 拆掉，之后 native 代码访问已释放内存 → `quickjs_c_bridge.dll` 里 c0000409 闪退），要用 `beforeNextEvent` 等当前原生调用回到事件循环后再终止 |
-| `.py` | 首次使用按需下载 Python 3.11 嵌入式运行时；`assets/python_runner/runner.py` 是桥 |
+| `.py` | Windows 完整包内置 Python 3.11 与依赖；源码构建可按需下载；`assets/python_runner/runner.py` 是桥 |
 | `jar` / DEX | 下载 jar → 若含 `classes.dex` 用 dex2jar 转换 → 反射调用 `stubs.jar` 里的 `SpiderRunner`；dex2jar 对 R8「去掉构造器」的 `NEW` 误译由 `DexJarRepair` 修正 |
 | 加固壳 | 首次用 unidbg ARM 桥解包，缓存到 `jvm_cache/payloads/<jar>/`；之后用 shell-shim（纯 Java 影子 `DexNative`）加载缓存，不再启动模拟器 |
+
+`assets/jvm/shell-real/*.jar` 是可选的预解包实现，缺失时安装和兼容层升级必须继续，
+并保留用户目录里已有的实现；`stubs.jar` 等必需资产缺失则应中止安装。
+饭太硬壳的原生路径还要求桌面 `Application` 继承 `ContextWrapper`，否则 JNI 在查找
+`android/content/ContextWrapper` 时失败，后续 `getLoader/getSpider` 才表现为 null。
+更新这组桩后必须递增 `JvmRuntime._shimsRev`，让已安装的用户也能得到新兼容层。
+
+修改这组 `ContextWrapper` / `Application` 桩后，用 JDK 17 重建并运行 JNI 类层级回归测试：
+
+```powershell
+./tool/build_jvm_stubs.ps1 -Jdk 'C:\path\to\jdk17'
+```
 
 jar 系蜘蛛**不读 `ext` 里的网盘凭据**，必须由应用主动落盘到固定位置
 （`.quarkcookie`、prefs 种子、Pizazz、`Cloud-drive.txt`、`TVBox/*.txt`），缺一个就会显示「还没有配置夸克 Cookie」。
@@ -189,10 +201,21 @@ jar 系蜘蛛**不读 `ext` 里的网盘凭据**，必须由应用主动落盘�
 （什么都不持久化，所以下次启动还会再弹）。仓库没有 release 时会退回 release 列表、
 再退回 tag，且只认版本形状的 tag（`v0.9.1`）。
 
-要真正触发提示：在 GitHub 上发布一个 tag 高于当前版本的 release（例如 `v0.9.1`）
-并填好更新说明即可。调试弹窗可以用
+应用默认从 `ccx1/MisaTV` 获取该 fork 的更新。调试弹窗可以用
 `flutter build windows --release --dart-define=MISA_UPDATE_REPO=microsoft/vscode`
-把检查指向别的仓库，不传时用本仓库（常量会被 tree-shake）。
+把检查指向别的仓库。
+
+### GitHub 自动发布
+
+将发布提交推送到 `main`，或在 GitHub Actions 对 `main` 手动运行 **Build and publish Release**。
+发布版本取自 `pubspec.yaml` 中的 `X.Y.Z+N`，其中 `X.Y.Z` 应与
+`lib/core/app_version.dart` 的 `kAppVersion` 一致。准备新版本时同时更新这两个文件，
+并递增构建编号 `N`。例如从 `1.2.0+13` 升至 `1.3.0+14`，应用版本填 `1.3.0`，
+流水线会在构建全部成功后公开 `v1.3.0` 的 Release。
+
+Release 提供 Windows x64 完整包、Android arm64 APK、macOS arm64 ZIP 和
+`SHA256SUMS.txt`。同一版本后续推送运行 Windows 检查及构建，产物可从 Actions 下载，
+已发布的版本及资产保持原样。
 
 ## Windows 渲染与内存
 
@@ -572,6 +595,11 @@ JS / PY 也各有自己的执行器池。**不要把这两个层次混为一谈*
 壳拿到端口 `-1` 并导致播放失败（有测试守护）。
 
 ## 测试
+
+多仓订阅（`urls`）在预览、直接导入和刷新时共用展开逻辑：最多 4 条线路并发，
+按仓库原顺序合并，子线路使用订阅的 UA / DoH 回退。失效、空线路单独报告，全部失败则
+保留原档案。预览不落盘，确认后直接保存预览快照，不再次请求线路。合并时把每个子仓的
+全局 `spider` 回填到其源的 `jar`，保留显式 `jar`，避免不同仓错误共用第一仓的 JAR。
 
 `flutter test` 覆盖纯逻辑层：配置解析（字段默认值、多仓合并、宽容 JSON、`py_` 过滤）、影片解析
 （XML / JSON、多线路、选集、筛选）、直播解析、XMLTV 时间与匹配、直播导出、自定义直播 UA（规则匹配 / 优先级 / 设置页行为）、播放器画面比例与外部播放器探测、

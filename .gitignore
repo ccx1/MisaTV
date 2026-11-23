@@ -71,4 +71,5 @@ app.*.map.json
 # Third-party binaries that are NOT redistributed with the source; see README "运行前准备"
 /assets/aria2/aria2c.exe
 /assets/jvm/shell-real/*.jar
+/assets/windows-runtimes/
 

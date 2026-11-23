@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:flutter/services.dart' show rootBundle;
+import 'package:flutter/services.dart' show AssetBundle, rootBundle;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
@@ -11,6 +11,7 @@ import '../../core/logging/app_log.dart';
 import '../../core/net/download_mirrors.dart';
 import '../../core/net/runtime_fetch.dart';
 import '../../core/platform/archive_extract.dart';
+import '../bundled_runtime.dart';
 
 /// JVM 运行时安装进度。
 class JvmProgress {
@@ -21,7 +22,7 @@ class JvmProgress {
 
 /// 按需安装的 JVM 运行时（JAR / DEX 蜘蛛源依赖）。
 ///
-/// 只从公开镜像分件取件，应用不内置大文件：
+/// 优先从 Windows 发布包离线补齐；源码构建缺少内置包时从公开镜像取件：
 ///   · JRE 17（Adoptium，清华镜像，华为云兜底）
 ///   · dex2jar 2.4（GitHub Release，走加速站）
 ///   · okhttp / okio / gson / jsoup / json / slf4j / bcprov / sqlite-jdbc（Maven 阿里云）
@@ -29,8 +30,15 @@ class JvmProgress {
 ///
 /// JRE 必须是 17：内置 stubs 与 SpiderRunner 的 class 文件版本为 61（Java 17）。
 class JvmRuntime {
-  JvmRuntime._();
+  JvmRuntime._() : _bundle = rootBundle;
+
+  @visibleForTesting
+  JvmRuntime.forTesting({required Directory directory, AssetBundle? bundle})
+    : _cachedDir = directory,
+      _bundle = bundle ?? rootBundle;
+
   static final instance = JvmRuntime._();
+  final AssetBundle _bundle;
 
   static const version = '17.0.20.1';
 
@@ -39,9 +47,10 @@ class JvmRuntime {
   /// 安卓端不需要下载 JVM 运行时：`jar_spider_android.dart` +
   /// `SpiderHostPlugin.kt` 用 ART / DexClassLoader 直接加载 DEX，原生等价于
   /// 桌面端的「JRE 17 + dex2jar」。只有桌面端才要求 JRE + dex2jar 已安装。
-  static Future<bool> jarSpiderReady() async {
+  static Future<bool> jarSpiderReady({bool refresh = false}) async {
+    if (kIsWeb) return false;
     if (Platform.isAndroid) return true;
-    return instance.installed();
+    return instance.installed(refresh: refresh);
   }
 
   /// JRE 压缩包；解压后取「含 bin/java.exe」的那层目录。
@@ -104,8 +113,7 @@ class JvmRuntime {
     // 但壳初始化会等它的 /health。这个 jar 用纯 Java 同端口应答，数据请求本身走 okhttp。
     'assets/jvm/go-proxy-shim.jar': 'shims/go-proxy-shim.jar',
     // 加固壳的真实实现预解包产物（对齐 winbox 的 shell-shim/real/<壳名>.jar）：
-    // 拿到对应壳时直接纯 Java 运行，不再依赖 unidbg 模拟器（实测 ftyshinidie 壳
-    // 在 x64 上模拟会崩在 toIntPeer(null)）。
+    // 拿到对应壳时直接纯 Java 运行，不必启动 unidbg 模拟器。
     //
     // 这两个文件**不随包分发**（见 assets/jvm/shell-real/README.md，版权归各自
     // 权利人）。它们只在加固壳按需解包后被写入用户目录；这里必须用
@@ -131,6 +139,7 @@ class JvmRuntime {
     if (cached != null) return cached;
     final support = await getApplicationSupportDirectory();
     final dir = Directory(p.join(support.path, 'jvm', version));
+    await BundledRuntime.restore('jvm/$version', dir);
     _cachedDir = dir;
     return dir;
   }
@@ -141,9 +150,9 @@ class JvmRuntime {
   /// 是否正在下载 / 安装（源调用据此避免重复弹窗）。
   bool get installing => _installing != null;
 
-  Future<bool> installed() async {
+  Future<bool> installed({bool refresh = false}) async {
     final cached = _cachedInstalled;
-    if (cached != null) return cached;
+    if (!refresh && cached != null) return cached;
     final dir = await _dir();
     final ok =
         File(p.join(dir.path, 'jre', 'bin', 'java.exe')).existsSync() &&
@@ -169,34 +178,31 @@ class JvmRuntime {
 
   /// 内置兼容层版本号：改了 assets/jvm 里的 jar（stubs / shell-shim / SpiderHost…）就 +1。
   /// 已安装目录只有在版本号变化时才整体刷新，避免每次启动都读一遍 5MB 资产。
-  static const _shimsRev = 15;
+  static const _shimsRev = 16;
 
   /// 老安装目录升级：把随包内置的兼容层刷新到当前版本（运行中的 JVM 占用时下次再试）。
-  Future<void> ensureShims() async {
+  Future<void> ensureShims({bool force = false}) async {
     final dir = await _dir();
     final shims = Directory(p.join(dir.path, 'shims'));
     final marker = File(p.join(shims.path, '.bundled-rev'));
-    if (marker.existsSync()) {
+    if (!force && marker.existsSync()) {
       try {
         if (marker.readAsStringSync().trim() == '$_shimsRev') return;
       } catch (_) {}
     }
-    var ok = true;
     for (final entry in _bundled.entries) {
-      // 不随包分发的资产永远缺席，不能拿它判定「刷新失败」，否则标记写不上、
-      // 每次启动都会把整套内置 jar 重写一遍。
-      final optional = optionalAssets.contains(entry.key);
       try {
         final file = await _ensureBundled(entry.key, entry.value);
-        if (!file.existsSync()) {
-          if (optional) continue;
-          ok = false;
+        if (!file.existsSync() && !optionalAssets.contains(entry.key)) {
+          throw StateError('JVM 兼容层写入失败：${entry.key}');
         }
-      } catch (_) {
-        if (!optional) ok = false;
+      } on FileSystemException catch (e) {
+        // 正在使用的旧兼容层可继续运行，但不能标记为已刷新；下次启动再试。
+        if (force) rethrow;
+        AppLog.w('jvm', '兼容层暂时无法更新，下次重试：${entry.key}', e);
+        return;
       }
     }
-    if (!ok) return;
     try {
       shims.createSync(recursive: true);
       marker.writeAsStringSync('$_shimsRev', flush: true);
@@ -208,7 +214,14 @@ class JvmRuntime {
   Future<File> _ensureBundled(String asset, String relative) async {
     final dir = await _dir();
     final file = File(p.join(dir.path, relative));
-    final data = await rootBundle.load(asset);
+    ByteData data;
+    try {
+      data = await _bundle.load(asset);
+    } on FlutterError {
+      // 缺失的预解包产物不影响基础 JVM；保留用户目录中已有的真实实现。
+      if (optionalAssets.contains(asset)) return file;
+      rethrow;
+    }
     final bytes = data.buffer.asUint8List(
       data.offsetInBytes,
       data.lengthInBytes,
@@ -216,14 +229,10 @@ class JvmRuntime {
     // 内置 jar 会随应用升级（如 SpiderHost 的类加载器修复）：只看「文件存在」会
     // 让老安装目录永远停在旧版本。大小不同即视为新版本并覆盖。
     if (!file.existsSync() || file.lengthSync() != bytes.length) {
-      try {
-        file.parent.createSync(recursive: true);
-        final tmp = File('${file.path}.tmp');
-        tmp.writeAsBytesSync(bytes, flush: true);
-        tmp.renameSync(file.path);
-      } catch (_) {
-        // 被运行中的 JVM 占用 → 下次启动再替换。
-      }
+      file.parent.createSync(recursive: true);
+      final tmp = File('${file.path}.tmp');
+      tmp.writeAsBytesSync(bytes, flush: true);
+      tmp.renameSync(file.path);
     }
     return file;
   }
@@ -258,6 +267,10 @@ class JvmRuntime {
       throw StateError('JVM 运行时目前仅支持 Windows');
     }
     final dir = await _dir();
+    if (await installed(refresh: true)) {
+      await ensureShims();
+      return dir;
+    }
     dir.createSync(recursive: true);
     final http = RuntimeFetch.newClient();
     AppLog.i('jvm', '开始安装 JVM 运行时 $version → ${dir.path}');
@@ -294,7 +307,9 @@ class JvmRuntime {
   void _removeOldVersions(Directory current) {
     try {
       for (final entity in current.parent.listSync()) {
-        if (entity is Directory && p.basename(entity.path) != version) {
+        if (entity is Directory &&
+            p.basename(entity.path) != version &&
+            p.basename(entity.path) != 'native') {
           entity.deleteSync(recursive: true);
         }
       }
@@ -434,10 +449,7 @@ class JvmRuntime {
         );
       }
 
-      _setProgress(
-        '下载依赖库 $index/${_libPaths.length}（$name）…',
-        base,
-      );
+      _setProgress('下载依赖库 $index/${_libPaths.length}（$name）…', base);
       var lastError = '';
       var ok = false;
       for (final baseUrl in bases) {
@@ -456,25 +468,7 @@ class JvmRuntime {
   }
 
   Future<void> _writeBundled(Directory dir) async {
-    for (final entry in _bundled.entries) {
-      final file = File(p.join(dir.path, entry.value));
-      ByteData data;
-      try {
-        data = await rootBundle.load(entry.key);
-      } catch (e) {
-        // 不随包分发的资产（加固壳真实实现）本来就没有，跳过即可；
-        // 其余内置 jar 缺席说明打包漏了，记一条警告但不阻断安装——
-        // 下载 JRE / dex2jar / 18 个依赖 jar 才是这条路的主体。
-        if (optionalAssets.contains(entry.key)) continue;
-        AppLog.w('jvm', '内置资产缺失，已跳过：${entry.key}', e);
-        continue;
-      }
-      file.parent.createSync(recursive: true);
-      file.writeAsBytesSync(
-        data.buffer.asUint8List(data.offsetInBytes, data.lengthInBytes),
-        flush: true,
-      );
-    }
+    await ensureShims(force: true);
     File(p.join(dir.path, 'marker.json')).writeAsStringSync(
       jsonEncode({
         'version': version,

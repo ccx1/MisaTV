@@ -122,9 +122,12 @@ class _HomePageState extends State<HomePage> {
     return '1:${filter.keywords.join('\u0001')}';
   }
 
+  String _homeSignature(AppState app) =>
+      '${app.activeProfileId ?? ''}|${app.activeSite?.key ?? ''}|'
+      '${app.jarReady}|${_filterSignature(app)}';
+
   void _scheduleSync(AppState app) {
-    final key =
-        '${app.activeProfileId ?? ''}|${app.activeSite?.key ?? ''}|${_filterSignature(app)}';
+    final key = _homeSignature(app);
     if (key == _loadedSiteKey) return;
     // 站点 / 过滤规则变化时即使上一请求还在跑也重新发起；旧请求由 _loadSeq 丢弃。
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -190,8 +193,7 @@ class _HomePageState extends State<HomePage> {
       _loadSeq++;
       _stopSlowHint();
       setState(() {
-        _loadedSiteKey =
-            '${app.activeProfileId ?? ''}|${site.key}|${_filterSignature(app)}';
+        _loadedSiteKey = _homeSignature(app);
         _data = null;
         _items.clear();
         _hidden = 0;
@@ -210,8 +212,7 @@ class _HomePageState extends State<HomePage> {
       _loadSeq++;
       _stopSlowHint();
       setState(() {
-        _loadedSiteKey =
-            '${app.activeProfileId ?? ''}||${_filterSignature(app)}';
+        _loadedSiteKey = _homeSignature(app);
         _data = null;
         _items.clear();
         _hidden = 0;
@@ -227,8 +228,7 @@ class _HomePageState extends State<HomePage> {
       return;
     }
     final seq = ++_loadSeq;
-    _loadedSiteKey =
-        '${app.activeProfileId ?? ''}|${site.key}|${_filterSignature(app)}';
+    _loadedSiteKey = _homeSignature(app);
     setState(() {
       _loading = true;
       _loadingMore = false;

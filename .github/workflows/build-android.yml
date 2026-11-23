@@ -1,20 +1,16 @@
 name: Build Android APK
 
 on:
+  workflow_call:
   workflow_dispatch:
     inputs:
       shell_jars:
         description: 'Restore optional assets/jvm/shell-real/*.jar from the SHELL_REAL_JARS_B64 secret (otherwise only jars committed to the repo are used)'
         type: boolean
         default: false
-  # 不在 push 时自动构建：Android 侧改动不频繁，而每次 push 到 main 都跑一遍
-  # 会白烧 Actions 分钟数。需要产物时手动触发，或用发布事件（发 Release 时自动出包）。
-  release:
-    types: [published]
 
-# 允许上传构建产物（APK），并在 release 事件下写入 release 资产。
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: android-build-retry-${{ github.ref }}
@@ -162,14 +158,3 @@ jobs:
             build-manifest.txt
           if-no-files-found: error
           retention-days: 30
-
-      - name: 挂到 Release 资产
-        if: github.event_name == 'release'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          cp build/app/outputs/flutter-apk/app-release.apk MisaTV-android-arm64.apk
-          ls -lh MisaTV-android-arm64.apk
-          gh release upload "${{ github.event.release.tag_name }}" \
-            MisaTV-android-arm64.apk --clobber

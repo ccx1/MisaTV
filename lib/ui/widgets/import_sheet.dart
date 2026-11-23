@@ -145,6 +145,11 @@ class _ImportSheetState extends State<_ImportSheet>
                 '点播源 ${preview.siteCount} 个 · 直播源 ${preview.liveCount} 条',
                 style: theme.textTheme.bodySmall,
               ),
+              if (preview.mergedCount > 0)
+                Text(
+                  '已合并 ${preview.mergedCount} 条线路',
+                  style: theme.textTheme.bodySmall,
+                ),
               const SizedBox(height: 12),
               Wrap(
                 spacing: 10,

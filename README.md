@@ -68,12 +68,13 @@ Flutter 重写，单进程、无账号、无遥测，数据只保存在本机。
 - [X] 订阅维护：启动后台静默回源、手动刷新、墓碑（删掉的源不复活）、本地新增源保留、批量删除、体检后一键删失败源、站点字段编辑
 - [X] 本地包改写：`clan://localhost`、`assets://`、`pkg://`、相对 `./` 与 `ext` 内文件
 - [X] 点播：CMS type 0（XML）/ type 1、4（JSON），分类、筛选、详情、线路与选集、分页
-- [X] 三类蜘蛛：`.js`（QuickJS，内置 ESM→CJS、`pdfh` / cheerio / CryptoJS）、`.py`（按需下载嵌入式 Python 3.11）、`jar` / DEX（按需下载 JRE 17 + dex2jar）
+- [X] 三类蜘蛛：`.js`（QuickJS，内置 ESM→CJS、`pdfh` / cheerio / CryptoJS）、`.py`（嵌入式 Python 3.11）、`jar` / DEX（JRE 17 + dex2jar）；Windows 完整包内置运行时与加固壳支持
 - [X] 加固壳源（Guard / DexNative）：首次用 unidbg ARM 桥解包并缓存，之后走纯 Java shell-shim 快路径
 - [X] 聚合搜索：多源并发流式返回，CMS / JS / PY / JAR 各自独立并发，按名称 + 年份去重并标注来源
 - [X] 发现与详情：豆瓣元数据补全（封面 / 简介 / 评分 / 演职员 / 相关推荐 / 影评），封面兜底与本地 `/img` 中继
 - [X] 播放：进度记忆、自动连播、倍速、全屏、多音轨、6 种画面比例、跳过片头片尾、长按临时倍速、桌面小窗
 - [X] 独立播放器窗口：内置播放器可弹到软件主界面之外的独立窗口播放，主界面保持可见（沉浸观影模式下自动不生效）
+- [X] 边播边缓存：HLS 分片与 MP4 / MKV Range 区间落盘，主窗口和独立播放器共用缓存目录；设置 → 播放 → 缓冲与缓存开启，默认关闭、上限 1GB
 - [X] 播放增强：弹幕（28 个内置接口 + 自定义）、外挂字幕（SubtitleCat / assrt / 自定义 API）、DLNA 投屏、外部播放器（PotPlayer / VLC / mpv / MPC-HC / 自定义 exe）
 - [X] 本地中继 `127.0.0.1:9978`：UA / Referer / Cookie 注入、m3u8 分片与密钥递归改写、可选去广告、网盘直链、WebDAV Basic、BT Range 取流
 - [X] 网盘：夸克 / UC / 百度网页扫码登录（WebView2），115 / 哔哩手动粘贴 Cookie，Cookie 注入 jar 系蜘蛛，夸克 `/member` 会话刷新；哔哩 Cookie 为可选增强，不配也能播 360P / 480P
@@ -88,9 +89,9 @@ Flutter 重写，单进程、无账号、无遥测，数据只保存在本机。
 
 ## 下载
 
-通过本页面 [Releases](https://github.com/yagami-hue/MisaTV/releases/latest) 选项卡下载：
+通过本 fork 的 [Releases](https://github.com/ccx1/MisaTV/releases/latest) 下载。
 
-<a href="https://github.com/yagami-hue/MisaTV/releases">
+<a href="https://github.com/ccx1/MisaTV/releases">
   <img src="https://img.shields.io/badge/Download-Latest_Release-2E9629?style=for-the-badge&logo=github" alt="Get it on Github" height="40"/>
 </a>
 
@@ -99,6 +100,7 @@ Flutter 重写，单进程、无账号、无遥测，数据只保存在本机。
 - 解压即用（绿色版）：订阅、历史与运行时会放在软件目录下的 `userdata`，复制整个文件夹即可连数据一起带走；网盘 / 迅雷 / WebDAV 凭据受 Windows DPAPI 保护，换电脑或换用户后需重新登录。
 - 安装目录不可写（如 Program Files）时自动回落到 `%APPDATA%\com.kniephos\MisaTV`。
 - 首次运行请先阅读并同意使用声明，再到「设置」页导入你自己的站源 / 直播源。
+- JVM、加固壳支持、Python（含依赖库）与 Yaozhi MPV 已随 Windows 完整包提供，首次启动从本地初始化，无需另行下载或安装；设置页显示「已内置」。MPV 可在播放页切换使用。
 
 ## Q&A
 
@@ -113,9 +115,9 @@ A: Flutter 桌面端默认走 Impeller，本项目的圆角 / 渐变 / 光晕界
 
 A: 多数是源站自身问题：站点失效、需要 `ext` 配置、需要登录或对接口做了加密。设置 → 订阅里对该源点「体检」可查看结果；少数源依赖站点专有加密，属于无解源，换一个源通常即可正常使用。删掉的源会记入墓碑，刷新订阅也不会复活。
 
-#### Q: 第一次进 JAR / 加固壳源为什么要等几分钟？
+#### Q: 第一次进 JAR / 加固壳源为什么还要等待？
 
-A: 这类源首次使用要下载运行时（JRE 17 + dex2jar 约 85MB）并做 `jar → dex` 转换；加固壳源还要用 ARM 桥解包一次（约 20–30 秒）。等待期间首页会显示转换 / 解包提示而不是只剩骨架屏，中断的产物下次启动会直接复用，不会重复跑。
+A: Windows 完整包已内置运行时，不需要联网安装扩展。源文件首次使用仍需转换，加固壳源还要用 ARM 桥解包一次（约 20–30 秒），完成后缓存复用。等待期间首页会显示转换 / 解包提示。
 
 #### Q: 为什么网盘播放要求先登录？
 
@@ -161,10 +163,18 @@ flutter run -d android
 flutter run -d chrome
 ```
 
-打包：
+Windows 完整包先在构建机器准备四项运行时（需要 PowerShell 7、Python 与 pip；第三方二进制不进入 Git），再构建。GitHub Windows 发布工作流自动执行这两步：
+
+```powershell
+./tool/prepare_windows_runtimes.ps1
+flutter build windows --release
+```
+
+产物中的 `runtimes/` 必须随 EXE 一起分发；不要打包 `userdata/`。首次启动把运行时初始化到应用数据目录，安装目录不可写时同样可用。完整包包含 MPV 整合包，体积会明显增大。
+
+其他平台：
 
 ```bash
-flutter build windows
 flutter build apk
 flutter build web
 ```
@@ -205,7 +215,7 @@ test/         纯逻辑单测（配置解析、影片解析、中继、去广告
 ## 说明
 
 - Fork 二改请注明 GitHub 此项目；参考源码重新开发请标注上游仓库。
-- 本仓库只包含本项目源码与自建资源；不含任何第三方私有蜘蛛 jar、JVM 运行时、逆向壳或专有产物。
+- Git 仓库只包含本项目源码与自建资源；Windows 完整发布包在构建时另外取得公开运行时与播放器，不包含第三方私有蜘蛛 jar 或预解包壳载荷。
 - 本项目是**个人学习 / 研究性质的开源实现**，与安卓版 TVBox、CatVod 及任何第三方站点、平台无隶属关系。
 
 ## 图标

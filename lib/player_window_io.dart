@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
+import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -16,6 +17,7 @@ import 'core/platform/portable_app_data.dart';
 import 'core/platform/window_service.dart';
 import 'core/theme/app_theme.dart';
 import 'services/cms_source.dart';
+import 'services/bundled_runtime.dart';
 import 'services/jar_spider_service.dart';
 import 'services/js_spider_service.dart';
 import 'services/live_service.dart';
@@ -50,6 +52,7 @@ Future<void> runStandalonePlayerWindow(String payloadPath) async {
     await migrateLegacySupportDir(supportPath);
   }
   await AppLog.init(supportDir: supportPath);
+  if (supportPath != null) await BundledRuntime.initialize(supportPath);
   FlutterError.onError = (details) {
     FlutterError.presentError(details);
     AppLog.e('flutter', '独立播放器窗口 Flutter 异常', details.exception, details.stack);
@@ -124,6 +127,9 @@ Future<void> runStandalonePlayerWindow(String payloadPath) async {
     purifyEnabled: () => state.playerSettings.m3u8Purify,
     davAuth: (id) => state.davService.authHeader(id),
     jvmProxyPort: () => sourceService.jar.activeHostProxyPort,
+    cacheDir: () => p.join(support, 'cache', 'stream'),
+    cacheEnabled: () => state.playerSettings.streamCache,
+    cacheLimitMb: () => state.playerSettings.streamCacheMb,
     externalEpisodeResolver: externalPlaylist.resolveEpisode,
   );
   ProxyRules.relayBase = () => LocalRelay.instance.baseUrl;

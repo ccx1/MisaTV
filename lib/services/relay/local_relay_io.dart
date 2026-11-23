@@ -744,27 +744,7 @@ class LocalRelay {
       }
     }
     final range = request.headers.value(HttpHeaders.rangeHeader);
-    // 边播边缓存：命中直接读盘，连上游都不碰 —— 拖回看过的位置不再回源。
     final cacheKey = StreamDiskCache.keyOf(target);
-    if (range == null &&
-        request.method == 'GET' &&
-        !target.toLowerCase().contains('.m3u8')) {
-      final cached = await _streamCache?.lookup(cacheKey);
-      if (cached != null) {
-        res.statusCode = 200;
-        res.headers.set(HttpHeaders.contentTypeHeader, cached.contentType);
-        res.headers.contentLength = cached.length;
-        // 命中本地边播缓存：字节同样是从中继发出去的，一起计量。
-        await res.addStream(
-          cached.file.openRead().map((chunk) {
-            PlaySpeedMeter.instance.add(chunk.length);
-            return chunk;
-          }),
-        );
-        await res.close();
-        return;
-      }
-    }
 
     // ★ 网盘 CDN 的「跨度限速」：开放区间（`bytes=0-`）与超大跨度会让同一节点
     //   被压到 ~0.1 MB/s，播放器表现为「有画面但极慢」。夹到 32MB 后回到
@@ -789,9 +769,44 @@ class LocalRelay {
     //
     //   所以网盘线路上没有 Range 时，主动合成首段 `bytes=0-<span-1>`，
     //   让上游回 206 + Content-Range —— 有总长、能 seek、速度也回到正常档。
-    final clamped = _shouldClampRange(provider, target)
+    var clamped = _shouldClampRange(provider, target)
         ? clampRange(range) ?? 'bytes=0-${_firstUpstreamRangeBytes - 1}'
         : range;
+    final manifest =
+        target.toLowerCase().contains('.m3u8') ||
+        target.toLowerCase().contains('.mpd');
+    if (_streamCache?.enabled() == true && !manifest && clamped != null) {
+      clamped = StreamDiskCache.limitRange(clamped);
+    }
+    if (!manifest && request.method == 'GET') {
+      final cached = clamped == null
+          ? await _streamCache?.lookup(cacheKey)
+          : await _streamCache?.lookupRange(cacheKey, clamped);
+      if (cached != null) {
+        res.statusCode = cached.contentRange.isEmpty ? 200 : 206;
+        res.headers.set(HttpHeaders.contentTypeHeader, cached.contentType);
+        res.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
+        if (cached.contentRange.isNotEmpty) {
+          res.headers.set(HttpHeaders.contentRangeHeader, cached.contentRange);
+          final span = StreamCacheRange.parse(cached.contentRange)!;
+          PlaySeekProbe.instance.noteRange(
+            start: span.start,
+            total: span.total,
+          );
+        }
+        res.headers.contentLength = cached.length;
+        await res.addStream(
+          cached.file
+              .openRead(cached.offset, cached.offset + cached.length)
+              .map((chunk) {
+                PlaySpeedMeter.instance.add(chunk.length);
+                return chunk;
+              }),
+        );
+        await res.close();
+        return;
+      }
+    }
     final changed = clamped != range;
     if (changed) {
       AppLog.i(
@@ -941,12 +956,17 @@ class LocalRelay {
       return;
     }
     // 未命中缓存：一边转发给播放器，一边把分片写进本地。
-    // 只缓存「整段 GET 的媒体响应」；Range、gzip、错误页一律透传。
+    // 整段分片和有合法 Content-Range 的区间都能落盘，错误页和 gzip 仅透传。
+    final responseRange = upstream.statusCode == 206
+        ? StreamCacheRange.parse(
+            _responseHeader(upstream, HttpHeaders.contentRangeHeader),
+          )
+        : null;
     final cacheable =
         _streamCache != null &&
-        range == null &&
         request.method == 'GET' &&
-        upstream.statusCode == 200 &&
+        ((upstream.statusCode == 200 && clamped == null) ||
+            responseRange != null) &&
         _responseHeader(upstream, HttpHeaders.contentEncodingHeader).isEmpty &&
         _cacheableContentType(contentType);
     final writer = cacheable
@@ -954,6 +974,7 @@ class LocalRelay {
             cacheKey,
             contentType: contentType,
             length: upstream.contentLength,
+            range: responseRange,
           )
         : null;
 
@@ -969,31 +990,50 @@ class LocalRelay {
       await res.close();
       return;
     }
+    var cancelled = false;
+    StreamSubscription<List<int>>? subscription;
+    final body = StreamController<List<int>>(sync: true);
+    body.onListen = () {
+      subscription = upstream.listen(
+        (chunk) {
+          writer.add(chunk);
+          PlaySpeedMeter.instance.add(chunk.length);
+          body.add(chunk);
+        },
+        onError: body.addError,
+        onDone: body.close,
+        cancelOnError: true,
+      );
+    };
+    body.onPause = () => subscription?.pause();
+    body.onResume = () => subscription?.resume();
+    body.onCancel = () => subscription?.cancel();
+    final session = _registerPlaySession(target, () {
+      cancelled = true;
+      unawaited(
+        () async {
+          await subscription?.cancel();
+          await body.close();
+          await writer.abort();
+        }().catchError((Object _) {}),
+      );
+    });
     try {
       // 用 addStream 转发，而不是 res.add 的裸循环：
       // addStream 会把播放器的读取背压一路传回上游，缓存开启时也不会
       // 把整段分片先读进内存再排队（内存抖动会表现成播放卡顿）。
-      await res.addStream(
-        upstream.transform(
-          StreamTransformer<List<int>, List<int>>.fromHandlers(
-            handleData: (chunk, sink) {
-              writer.add(chunk);
-              // 实时网速就是这里转发的字节量（fvp 的 bitRate 是标称码率，
-              // Remux 源常常是 0）。
-              PlaySpeedMeter.instance.add(chunk.length);
-              sink.add(chunk);
-            },
-          ),
-        ),
-      );
+      res.bufferOutput = false;
+      await res.addStream(body.stream);
+      if (!cancelled) await writer.commit();
       await res.close();
-      await writer.commit();
     } catch (_) {
       // 播放器提前断开（拖动 / 切集）：半截文件不留在缓存里。
       await writer.abort();
       try {
         await res.close();
       } catch (_) {}
+    } finally {
+      _unregisterPlaySession(session);
     }
   }
 
@@ -1089,9 +1129,7 @@ class LocalRelay {
     if (m == null) return range;
     final start = int.tryParse(m.group(1)!);
     if (start == null || start < 0) return range;
-    final span = start == 0
-        ? _firstUpstreamRangeBytes
-        : _maxUpstreamRangeBytes;
+    final span = start == 0 ? _firstUpstreamRangeBytes : _maxUpstreamRangeBytes;
     final endText = m.group(2)!.trim();
     if (endText.isEmpty) {
       // 开放区间：夹成固定跨度（首段更小）
@@ -1506,9 +1544,7 @@ class LocalRelay {
       }
     }
 
-    void discard(
-      ({HttpClientResponse response, String finalUrl})? opened,
-    ) {
+    void discard(({HttpClientResponse response, String finalUrl})? opened) {
       if (opened == null) return;
       unawaited(opened.response.drain<void>().catchError((Object _) {}));
     }
@@ -2765,8 +2801,6 @@ class LocalRelay {
     await res.close();
   }
 }
-
-
 
 /// 一条 `/play` 转发会话：记住它的地址与「怎么取消」。
 ///

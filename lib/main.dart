@@ -17,6 +17,7 @@ import 'player_window.dart';
 import 'models/site_config.dart';
 import 'models/vod.dart';
 import 'services/boss_key/boss_key_service.dart';
+import 'services/bundled_runtime.dart';
 import 'services/cms_source.dart';
 import 'services/fonts/hero_fonts.dart';
 import 'services/jar_spider_service.dart';
@@ -111,6 +112,9 @@ Future<void> _bootstrap(List<String> args) async {
     return true;
   };
   AppLog.i('app', '日志目录: ${AppLog.directory}');
+  if (!kIsWeb && supportPath != null) {
+    await BundledRuntime.initialize(supportPath);
+  }
 
   // 沉浸 Hero 的可选字体包：后台恢复已安装字体，不阻塞首屏。
   unawaited(HeroFontService.instance.init());

@@ -98,8 +98,10 @@ class ImportPreview {
     required this.removed,
     required this.changed,
     this.warnings = const [],
+    this.mergedCount = 0,
   });
 
+  final int mergedCount;
   final String text;
   final String url;
   final String baseUrl;
@@ -696,7 +698,7 @@ class AppState extends ChangeNotifier {
 
   /// 安装 / 删除 JVM 运行时后刷新可用性（触发界面重算）。
   Future<void> refreshJarReady() async {
-    final ready = await JvmRuntime.jarSpiderReady();
+    final ready = await JvmRuntime.jarSpiderReady(refresh: true);
     if (ready == jarReady) return;
     jarReady = ready;
     _syncGlobalJar();
@@ -1226,6 +1228,8 @@ class AppState extends ChangeNotifier {
       url: preview.url,
       baseUrl: preview.baseUrl,
       name: preview.name,
+      previewWarnings: preview.warnings,
+      previewMergedCount: preview.mergedCount,
     );
   }
 
@@ -1300,21 +1304,17 @@ class AppState extends ChangeNotifier {
     );
   }
 
-  ImportPreview _buildImportPreview(
+  Future<ImportPreview> _buildImportPreview(
     String text, {
     required String url,
     required String baseUrl,
     String? name,
-  }) {
-    final body = ConfigParser.decodePayload(text);
-    final parsed = ConfigParser.parse(
-      body,
+  }) async {
+    final prepared = await _prepareImport(
+      text,
       baseUrl: baseUrl.isEmpty ? url : baseUrl,
-      jarReady: jarReady,
     );
-    if (parsed.multiUrls.isNotEmpty) {
-      throw AppException('多仓订阅暂不支持导入前预览，请直接导入');
-    }
+    final parsed = prepared.parsed;
     final current = activeProfile;
     final currentConfig = current == null
         ? const SiteConfig()
@@ -1359,7 +1359,7 @@ class AppState extends ChangeNotifier {
         ? name!.trim()
         : (url.isEmpty ? '本地配置' : _nameFromUrl(url, profiles.length + 1));
     return ImportPreview(
-      text: body,
+      text: prepared.text,
       url: url,
       baseUrl: baseUrl,
       name: label,
@@ -1369,6 +1369,7 @@ class AppState extends ChangeNotifier {
       removed: removed,
       changed: changed,
       warnings: parsed.warnings,
+      mergedCount: prepared.mergedCount,
     );
   }
 
@@ -1378,9 +1379,12 @@ class AppState extends ChangeNotifier {
   /// HTTPS 域名出 HTML/劫持时再用 DoH 兜底 → 同路径换协议再试。
   ///
   /// 整条阶梯 60 秒截止，避免一串失败尝试把导入拖到几分钟。
-  Future<HttpResponseText> _fetchSubscription(String url) async {
+  Future<HttpResponseText> _fetchSubscription(
+    String url, {
+    Duration timeout = const Duration(seconds: 60),
+  }) async {
     final target = normalizeHostUrl(url);
-    final deadline = DateTime.now().add(const Duration(seconds: 60));
+    final deadline = DateTime.now().add(timeout);
     final plainHttp = target.toLowerCase().startsWith('http://');
     HttpResponseText? first;
     Object? firstError;
@@ -1399,7 +1403,14 @@ class AppState extends ChangeNotifier {
     }
 
     try {
-      first = await http.getText(target, timeout: const Duration(seconds: 25));
+      final remaining = deadline.difference(DateTime.now());
+      if (remaining <= Duration.zero) throw TimeoutException('订阅请求超时');
+      first = await http.getText(
+        target,
+        timeout: remaining < const Duration(seconds: 25)
+            ? remaining
+            : const Duration(seconds: 25),
+      );
       if (!_needsUaRetry(first.body, first.contentType)) return first;
     } catch (e) {
       firstError = e;
@@ -1750,32 +1761,38 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<ImportOutcome> _importText(
+  /// 预览、直接导入和刷新使用同一份多仓展开结果；这里只读，不写入档案。
+  Future<({String text, ParsedConfig parsed, int mergedCount})> _prepareImport(
     String text, {
-    required String url,
-    String? baseUrl,
-    String? name,
-    String? replaceProfileId,
-    bool activate = true,
-    bool requireContent = false,
+    required String baseUrl,
   }) async {
     text = ConfigParser.decodePayload(text);
-    var parsed = ConfigParser.parse(
+    final parsed = ConfigParser.parse(
       text,
-      baseUrl: baseUrl ?? url,
+      baseUrl: baseUrl,
       jarReady: jarReady,
     );
-    var warnings = <String>[...parsed.warnings];
-    var mergedCount = 0;
-    var rawJson = text;
+    if (parsed.multiUrls.isEmpty) {
+      return (text: text, parsed: parsed, mergedCount: 0);
+    }
 
-    if (parsed.multiUrls.isNotEmpty) {
-      final configs = <SiteConfig>[];
-      final failures = <String>[];
-      for (final entry in parsed.multiUrls) {
+    final entries = parsed.multiUrls;
+    final results = List<ParsedConfig?>.filled(entries.length, null);
+    final failures = List<String?>.filled(entries.length, null);
+    var next = 0;
+    Future<void> loadNext() async {
+      while (next < entries.length) {
+        final index = next++;
+        final entry = entries[index];
+        final label = entry.name.isEmpty ? entry.url : entry.name;
         try {
-          final res = await http.getText(
-            entry.url,
+          final childUrl = baseUrl.isEmpty
+              ? entry.url
+              : Uri.parse(normalizeHostUrl(baseUrl))
+                    .resolve(entry.url)
+                    .toString();
+          final res = await _fetchSubscription(
+            childUrl,
             timeout: const Duration(seconds: 20),
           );
           _ensureTextResponse(res.body, res.contentType);
@@ -1784,43 +1801,60 @@ class AppState extends ChangeNotifier {
             baseUrl: res.url,
             jarReady: jarReady,
           );
-          if (sub.multiUrls.isNotEmpty) {
-            failures.add(
-              '${entry.name.isEmpty ? entry.url : entry.name}: 嵌套多仓未展开',
-            );
-            continue;
+          if (sub.multiUrls.isNotEmpty) throw AppException('嵌套多仓未展开');
+          if (sub.config.sites.isEmpty && sub.config.lives.isEmpty) {
+            throw AppException('没有可导入的点播源或直播源');
           }
-          configs.add(sub.config);
-          mergedCount++;
+          results[index] = sub;
         } catch (e) {
-          failures.add('${entry.name.isEmpty ? entry.url : entry.name}: $e');
+          failures[index] = '$label: $e';
         }
       }
-      if (configs.isEmpty) {
-        throw AppException('多仓订阅展开失败：${failures.take(3).join('；')}');
-      }
-      final merged = ConfigParser.merge(configs);
-      rawJson = jsonEncode(merged.toJson());
-      bool usableOf(SourceBean s) => s.supported || (jarReady && s.isJarSpider);
-      parsed = ParsedConfig(
-        config: merged,
-        report: ConfigParser.buildImportReport([
-          for (final c in configs)
-            for (final s in c.sites)
-              SiteReportItem(
-                index: 0,
-                key: s.key,
-                name: s.name,
-                type: s.type,
-                api: s.api,
-                status: usableOf(s) ? 'OK' : 'DEGRADE',
-                message: usableOf(s) ? '已导入' : s.unsupportedReason,
-              ),
-        ]),
-        warnings: [...warnings, if (failures.isNotEmpty) ...failures],
-      );
-      warnings = parsed.warnings;
     }
+
+    // 少量并发避免数十条失效线路逐条等满超时；按原顺序合并，结果不受响应速度影响。
+    await Future.wait([
+      for (var i = 0; i < entries.length && i < 4; i++) loadNext(),
+    ]);
+    final loaded = results.whereType<ParsedConfig>().toList();
+    final errors = failures.whereType<String>().toList();
+    if (loaded.isEmpty) {
+      throw AppException('多仓订阅展开失败：${errors.take(3).join('；')}');
+    }
+    final merged = ConfigParser.merge([for (final sub in loaded) sub.config]);
+    final rawJson = jsonEncode(merged.toJson());
+    final mergedParsed = ConfigParser.parse(rawJson, jarReady: jarReady);
+    return (
+      text: rawJson,
+      parsed: ParsedConfig(
+        config: mergedParsed.config,
+        report: mergedParsed.report,
+        warnings: [
+          ...parsed.warnings,
+          for (final sub in loaded) ...sub.warnings,
+          ...errors,
+        ],
+      ),
+      mergedCount: loaded.length,
+    );
+  }
+
+  Future<ImportOutcome> _importText(
+    String text, {
+    required String url,
+    String? baseUrl,
+    String? name,
+    String? replaceProfileId,
+    bool activate = true,
+    bool requireContent = false,
+    List<String> previewWarnings = const [],
+    int previewMergedCount = 0,
+  }) async {
+    final prepared = await _prepareImport(text, baseUrl: baseUrl ?? url);
+    var parsed = prepared.parsed;
+    final warnings = <String>{...previewWarnings, ...parsed.warnings}.toList();
+    final mergedCount = previewMergedCount + prepared.mergedCount;
+    var rawJson = prepared.text;
 
     if (requireContent &&
         parsed.config.sites.isEmpty &&
@@ -2649,6 +2683,7 @@ class AppState extends ChangeNotifier {
     PlayResult play,
     String provider, {
     bool purify = false,
+    bool cache = false,
   }) {
     final url = play.url.trim();
     if (url.isEmpty) return false;
@@ -2677,14 +2712,14 @@ class AppState extends ChangeNotifier {
         lower.contains('m3u8') ||
         lower.contains('.mpd') ||
         provider.isNotEmpty ||
-        purify;
+        purify || cache;
   }
 
   /// 交给播放器前的最后一步：带 header / 防盗链 / m3u8 的地址改走本地中继。
   ///
   /// - 有 header（UA / Referer / Cookie）或 HLS 清单 → 经 `/play` 注入与改写；
   /// - 网盘直链即使没有 header，也经 `/play` 注入本机登录 Cookie；
-  /// - mp4 直链且无 header 时保持直连，避免多一跳；
+  /// - 开启边播缓存时，远程直链也经中继落盘；
   /// - 中继未启动（Web 版）时原样返回。
   PlayResult preparePlay(PlayResult play, {bool forceRelay = false}) {
     if (!play.playable || play.externalLink.isNotEmpty) return play;
@@ -2720,7 +2755,12 @@ class AppState extends ChangeNotifier {
         lower.contains('127.0.0.1') || lower.contains('localhost');
     final needsRelay =
         (forceRelay && ProxyRuntime.instance.enabled && !localProxy) ||
-        needsRelayForPlay(play, provider, purify: playerSettings.m3u8Purify);
+        needsRelayForPlay(
+          play,
+          provider,
+          purify: playerSettings.m3u8Purify,
+          cache: playerSettings.streamCache,
+        );
     if (!needsRelay) return play;
     final wrapped = relay.playUrl(
       url,

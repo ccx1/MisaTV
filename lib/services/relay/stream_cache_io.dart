@@ -9,9 +9,8 @@ import 'package:crypto/crypto.dart';
 /// 「边播边缓存」把播放器已经下行的分片顺手写到本地：重新拖回看过的位置、
 /// 或者第二天重看同一集时，直接读盘不再回源。
 ///
-/// 只缓存**整段 GET 的小文件**（HLS 分片、封面图之类）：
-/// 带 Range 的请求、m3u8 清单、gzip 响应、以及超过 [maxEntryBytes] 的响应
-/// 都不进缓存 —— 大文件交给播放器自己的内存缓冲，免得一轮播放就把盘塞满。
+/// HLS 分片整段保存；MP4 / MKV 等大文件按 Range 保存已播放区间。
+/// 清单、gzip 响应和超过 [maxEntryBytes] 的单次响应不进缓存。
 class StreamDiskCache {
   StreamDiskCache({
     required this.dir,
@@ -31,6 +30,18 @@ class StreamDiskCache {
   /// 单条上限：分片一般 2–8MB，超过 64MB 的多半是整片 MP4，不缓存。
   static const int maxEntryBytes = 64 * 1024 * 1024;
 
+  /// 开启磁盘缓存时，每次最多从上游读取 8MB，避免开放 Range 下载整部影片。
+  static String limitRange(String range) {
+    final match = RegExp(r'^bytes=(\d+)-(\d*)$').firstMatch(range.trim());
+    if (match == null) return range;
+    final start = int.tryParse(match[1]!);
+    if (start == null) return range;
+    final end = int.tryParse(match[2]!);
+    final limit = start + 8 * 1024 * 1024 - 1;
+    if (end != null && end < start) return range;
+    return 'bytes=$start-${end == null || end > limit ? limit : end}';
+  }
+
   final Map<String, int> _sizes = {};
 
   /// 最近一次命中的时间：淘汰按它排序，避免每次都 stat 整个目录。
@@ -42,6 +53,8 @@ class StreamDiskCache {
 
   /// 已经确认存在的分片目录，避免每个分片都 create 一次。
   final Set<String> _readyDirs = {};
+  final Set<String> _writing = {};
+  int _generation = 0;
 
   int _bytes = 0;
   bool _indexed = false;
@@ -89,7 +102,6 @@ class StreamDiskCache {
   Future<void> _buildIndex() async {
     try {
       _sizes.clear();
-      _touched.clear();
       _bytes = 0;
       _indexedDir = dir;
       final root = Directory(dir);
@@ -102,10 +114,14 @@ class StreamDiskCache {
         final path = entity.path;
         // 下载目录与缓存共用根路径，但不能被当成缓存条目索引 / 淘汰。
         if (path.startsWith(_downloadsPrefix)) continue;
+        // 另一个播放器窗口可能正在写入，只清理超过一天的崩溃残留。
         if (path.endsWith('.tmp')) {
-          // 上次进程被杀留下的半截文件
           try {
-            await entity.delete();
+            if ((await entity.stat()).modified.isBefore(
+              DateTime.now().subtract(const Duration(days: 1)),
+            )) {
+              await entity.delete();
+            }
           } catch (_) {}
           continue;
         }
@@ -120,6 +136,8 @@ class StreamDiskCache {
           _bytes += stat.size;
         } catch (_) {}
       }
+      _touched.removeWhere((path, _) => !_sizes.containsKey(path));
+      _types.removeWhere((path, _) => !_sizes.containsKey(path));
       _indexed = true;
     } catch (_) {
       // 目录不可读时保留已扫到的部分；标记为已索引，避免每个分片都重扫一遍。
@@ -169,14 +187,71 @@ class StreamDiskCache {
     return 'application/octet-stream';
   }
 
+  /// 仅在缓存完整覆盖请求区间时命中，不能把未下载的空洞当作视频数据。
+  Future<StreamCacheEntry?> lookupRange(String key, String range) async {
+    if (dir.isEmpty || !enabled()) return null;
+    final match = RegExp(r'^bytes=(\d*)-(\d*)$').firstMatch(range.trim());
+    if (match == null || (match[1]!.isEmpty && match[2]!.isEmpty)) return null;
+    final candidates = <(String, StreamCacheRange?)>[(key, null)];
+    try {
+      await for (final entity in _entry(key).parent.list()) {
+        final name = entity.uri.pathSegments.last;
+        if (entity is! File || !name.startsWith('${key}_')) continue;
+        final parts = name.substring(key.length + 1).split('_');
+        if (parts.length != 3) continue;
+        final numbers = parts.map(int.tryParse).toList();
+        if (numbers.any((n) => n == null)) continue;
+        final span = StreamCacheRange(numbers[0]!, numbers[1]!, numbers[2]!);
+        if (span.valid) candidates.add((name, span));
+      }
+    } on FileSystemException {
+      // 还没有该视频的分片目录。
+    }
+    for (final (entryKey, span) in candidates) {
+      final cached = await lookup(entryKey);
+      if (cached == null) continue;
+      if (span != null && span.length != cached.length) continue;
+      final total = span?.total ?? cached.length;
+      final suffix = match[1]!.isEmpty;
+      final tail = int.tryParse(match[2]!);
+      if (suffix && (tail == null || tail <= 0)) return null;
+      final start = suffix
+          ? (total - tail!).clamp(0, total)
+          : int.tryParse(match[1]!);
+      if (start == null) return null;
+      final requestedEnd = suffix ? total - 1 : (tail ?? total - 1);
+      final end = requestedEnd.clamp(0, total - 1);
+      if (start > end ||
+          start < (span?.start ?? 0) ||
+          end > (span?.end ?? total - 1)) {
+        continue;
+      }
+      return StreamCacheEntry(
+        file: cached.file,
+        contentType: cached.contentType,
+        length: end - start + 1,
+        offset: start - (span?.start ?? 0),
+        contentRange: 'bytes $start-$end/$total',
+      );
+    }
+    return null;
+  }
+
   /// 未命中时开一个写入口；返回 null 表示这次响应不进缓存。
   Future<StreamCacheWriter?> open(
     String key, {
     required String contentType,
     required int length,
+    StreamCacheRange? range,
   }) async {
     if (dir.isEmpty || !enabled()) return null;
     if (length <= 0 || length > maxEntryBytes) return null;
+    if (length > limitMb() * 1024 * 1024) return null;
+    if (range != null) {
+      if (!range.valid || range.length != length) return null;
+      key = '${key}_${range.start}_${range.end}_${range.total}';
+    }
+    if (!_writing.add(key)) return null;
     if (_indexed) {
       // 索引已就绪：淘汰只动内存记账，文件删除异步进行，不占取流路径。
       _evictFor(length);
@@ -192,8 +267,10 @@ class StreamDiskCache {
         await parent.create(recursive: true);
         _readyDirs.add(parent.path);
       }
-      final tmp = File('${entry.path}.tmp');
-      if (await tmp.exists()) await tmp.delete();
+      // 各窗口使用独立临时文件，同一分片的并发请求不会相互截断。
+      final tmp = await File(
+        '${entry.path}.${pid}_${DateTime.now().microsecondsSinceEpoch}.tmp',
+      ).create(exclusive: true);
       return StreamCacheWriter._(
         cache: this,
         key: key,
@@ -201,8 +278,12 @@ class StreamDiskCache {
         tmp: tmp,
         sink: tmp.openWrite(),
         contentType: contentType,
+        expectedLength: length,
+        generation: _generation,
       );
     } catch (_) {
+      _writing.remove(key);
+      _readyDirs.remove(entry.parent.path);
       return null;
     }
   }
@@ -257,6 +338,8 @@ class StreamDiskCache {
   /// 清空缓存目录（设置页的「清空缓存」）。保留下载视频目录。
   Future<void> clear() async {
     if (dir.isEmpty) return;
+    _generation++;
+    await _indexing;
     final root = Directory(dir);
     try {
       if (await root.exists()) {
@@ -281,6 +364,8 @@ class StreamDiskCache {
   /// 当前占用字节数（设置页展示用）。
   Future<int> totalBytes() async {
     if (dir.isEmpty) return 0;
+    // 独立窗口共享目录，但各自的内存索引独立；仅展示统计时重新核对磁盘。
+    _indexed = false;
     await _ensureIndex();
     return _bytes;
   }
@@ -298,11 +383,37 @@ class StreamCacheEntry {
     required this.file,
     required this.contentType,
     required this.length,
+    this.offset = 0,
+    this.contentRange = '',
   });
 
   final File file;
   final String contentType;
   final int length;
+  final int offset;
+  final String contentRange;
+}
+
+class StreamCacheRange {
+  const StreamCacheRange(this.start, this.end, this.total);
+
+  final int start;
+  final int end;
+  final int total;
+  int get length => end - start + 1;
+  bool get valid => start >= 0 && end >= start && total > end;
+
+  static StreamCacheRange? parse(String header) {
+    final match = RegExp(r'^bytes (\d+)-(\d+)/(\d+)$')
+        .firstMatch(header.trim());
+    if (match == null) return null;
+    final start = int.tryParse(match[1]!);
+    final end = int.tryParse(match[2]!);
+    final total = int.tryParse(match[3]!);
+    if (start == null || end == null || total == null) return null;
+    final range = StreamCacheRange(start, end, total);
+    return range.valid ? range : null;
+  }
 }
 
 /// 写入器：一边转发给播放器，一边把同样的字节写进 `<key>.tmp`，
@@ -315,7 +426,18 @@ class StreamCacheWriter {
     required this.tmp,
     required this.sink,
     required this.contentType,
-  });
+    required this.expectedLength,
+    required this.generation,
+  }) {
+    unawaited(
+      sink.done.then<void>(
+        (_) {},
+        onError: (Object _, StackTrace _) {
+          _failed = true;
+        },
+      ),
+    );
+  }
 
   final StreamDiskCache cache;
   final String key;
@@ -323,16 +445,19 @@ class StreamCacheWriter {
   final File tmp;
   final String contentType;
   final IOSink sink;
+  final int expectedLength;
+  final int generation;
   bool _done = false;
+  bool _failed = false;
   int _written = 0;
 
   void add(List<int> chunk) {
-    if (_done) return;
+    if (_done || _failed) return;
     try {
       sink.add(chunk);
       _written += chunk.length;
     } catch (_) {
-      _done = true;
+      _failed = true;
     }
   }
 
@@ -341,6 +466,13 @@ class StreamCacheWriter {
     _done = true;
     try {
       await sink.close();
+      if (_failed ||
+          _written != expectedLength ||
+          generation != cache._generation ||
+          !cache.enabled()) {
+        await abort();
+        return;
+      }
       if (await entry.exists()) {
         try {
           await entry.delete();
@@ -351,15 +483,18 @@ class StreamCacheWriter {
         await File('${entry.path}.json')
             .writeAsString(jsonEncode({'type': contentType}));
       } catch (_) {}
-      // 记账用实际写入量：上游截断时按声明长度会少算占用。
       cache._put(entry.path, _written, contentType);
+      cache._evictFor(0);
     } catch (_) {
       await abort();
+    } finally {
+      cache._writing.remove(key);
     }
   }
 
   Future<void> abort() async {
     _done = true;
+    cache._writing.remove(key);
     try {
       await sink.close();
     } catch (_) {}

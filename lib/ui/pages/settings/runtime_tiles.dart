@@ -141,7 +141,13 @@ class _MpvExtensionTileState extends State<_MpvExtensionTile> {
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: Text(
-                          _loading ? '检查中' : (_installed ? '已安装' : '未安装'),
+                          _loading
+                              ? '检查中'
+                              : (_installed
+                                    ? (BundledRuntime.available('mpv-yaozhi')
+                                          ? '已内置'
+                                          : '已安装')
+                                    : '未安装'),
                           style: TextStyle(
                             fontSize: 9,
                             fontWeight: FontWeight.w700,
@@ -156,7 +162,7 @@ class _MpvExtensionTileState extends State<_MpvExtensionTile> {
                   const SizedBox(height: 2),
                   Text(
                     _installed
-                        ? '${tag.isEmpty ? '已下载' : tag} · 播放页可切换外部 MPV 窗口'
+                        ? '${tag.isEmpty ? '已就绪' : tag} · 播放页可切换外部 MPV 窗口'
                         : '内置播放器已支持 HLS / MP4 / MKV；需要蓝光、HEVC 或 HDR 时可下载整合包（约 320 MB）',
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: theme.colorScheme.onSurface.withValues(
@@ -175,9 +181,9 @@ class _MpvExtensionTileState extends State<_MpvExtensionTile> {
                 height: 22,
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
-            else if (_installed)
+            else if (_installed && !BundledRuntime.available('mpv-yaozhi'))
               TextButton(onPressed: _remove, child: const Text('删除'))
-            else
+            else if (!_installed)
               FilledButton.tonal(onPressed: _install, child: const Text('下载')),
           ],
         ),
@@ -366,7 +372,15 @@ class _JvmRuntimeTileState extends State<_JvmRuntimeTile> {
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: Text(
-                          _loading ? '检查中' : (_installed ? '已安装' : '未安装'),
+                          _loading
+                              ? '检查中'
+                              : (_installed
+                                    ? (BundledRuntime.available(
+                                            'jvm/${JvmRuntime.version}',
+                                          )
+                                          ? '已内置'
+                                          : '已安装')
+                                    : '未安装'),
                           style: TextStyle(
                             fontSize: 9,
                             fontWeight: FontWeight.w700,
@@ -382,7 +396,7 @@ class _JvmRuntimeTileState extends State<_JvmRuntimeTile> {
                   Text(
                     _installed
                         ? 'JAR / DEX 蜘蛛源可运行（JRE 17 + dex2jar）'
-                        : '首次使用 .jar 蜘蛛时按需下载（约 85 MB），不占用安装包体积',
+                        : '运行时缺失，可下载修复（JRE 17 + dex2jar，约 85 MB）',
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: theme.colorScheme.onSurface.withValues(
                         alpha: 0.55,
@@ -400,9 +414,10 @@ class _JvmRuntimeTileState extends State<_JvmRuntimeTile> {
                 height: 22,
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
-            else if (_installed)
+            else if (_installed &&
+                !BundledRuntime.available('jvm/${JvmRuntime.version}'))
               TextButton(onPressed: _remove, child: const Text('删除'))
-            else
+            else if (!_installed)
               FilledButton.tonal(onPressed: _install, child: const Text('下载')),
           ],
         ),
@@ -589,7 +604,15 @@ class _ArmBridgeTileState extends State<_ArmBridgeTile> {
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: Text(
-                          _loading ? '检查中' : (_installed ? '已安装' : '未安装'),
+                          _loading
+                              ? '检查中'
+                              : (_installed
+                                    ? (BundledRuntime.available(
+                                            'jvm/native/${ArmBridgeRuntime.version}',
+                                          )
+                                          ? '已内置'
+                                          : '已安装')
+                                    : '未安装'),
                           style: TextStyle(
                             fontSize: 9,
                             fontWeight: FontWeight.w700,
@@ -605,7 +628,7 @@ class _ArmBridgeTileState extends State<_ArmBridgeTile> {
                   Text(
                     _installed
                         ? '加固壳（Guard / DexNative）源可解包（unidbg 0.9.9 · dynarmic）'
-                        : '加固壳源首次调用时解包一次（约 39 MB），之后走纯 Java 快路径',
+                        : '运行时缺失，可下载修复（unidbg ARM 桥，约 39 MB）',
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: theme.colorScheme.onSurface.withValues(
                         alpha: 0.55,
@@ -623,9 +646,12 @@ class _ArmBridgeTileState extends State<_ArmBridgeTile> {
                 height: 22,
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
-            else if (_installed)
+            else if (_installed &&
+                !BundledRuntime.available(
+                  'jvm/native/${ArmBridgeRuntime.version}',
+                ))
               TextButton(onPressed: _remove, child: const Text('删除'))
-            else
+            else if (!_installed)
               FilledButton.tonal(onPressed: _install, child: const Text('下载')),
           ],
         ),
@@ -810,7 +836,15 @@ class _PythonRuntimeTileState extends State<_PythonRuntimeTile> {
                           borderRadius: BorderRadius.circular(6),
                         ),
                         child: Text(
-                          _loading ? '检查中' : (_installed ? '已安装' : '未安装'),
+                          _loading
+                              ? '检查中'
+                              : (_installed
+                                    ? (BundledRuntime.available(
+                                            'python/${PyRuntime.version}',
+                                          )
+                                          ? '已内置'
+                                          : '已安装')
+                                    : '未安装'),
                           style: TextStyle(
                             fontSize: 9,
                             fontWeight: FontWeight.w700,
@@ -826,7 +860,7 @@ class _PythonRuntimeTileState extends State<_PythonRuntimeTile> {
                   Text(
                     _installed
                         ? 'PY 蜘蛛源可运行（Python 3.11 + requests/lxml）'
-                        : '首次使用 .py 蜘蛛时按需下载（约 20 MB），不占用安装包体积',
+                        : '运行时缺失，可下载修复（Python 3.11 与依赖库，约 20 MB）',
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: theme.colorScheme.onSurface.withValues(
                         alpha: 0.55,
@@ -844,9 +878,10 @@ class _PythonRuntimeTileState extends State<_PythonRuntimeTile> {
                 height: 22,
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
-            else if (_installed)
+            else if (_installed &&
+                !BundledRuntime.available('python/${PyRuntime.version}'))
               TextButton(onPressed: _remove, child: const Text('删除'))
-            else
+            else if (!_installed)
               FilledButton.tonal(onPressed: _install, child: const Text('下载')),
           ],
         ),
@@ -1122,4 +1157,3 @@ Future<void> _deleteKazumiRule(
     _settingsSnack(context, '已删除 Kazumi 规则「${rule.name}」');
   }
 }
-

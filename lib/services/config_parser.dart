@@ -618,7 +618,10 @@ class ConfigParser {
     var spider = '';
 
     for (final c in configs) {
-      for (final site in c.sites) {
+      for (final original in c.sites) {
+        final site = original.jar.trim().isEmpty && c.spider.trim().isNotEmpty
+            ? SourceBean.fromJson({...original.toJson(), 'jar': c.spider})
+            : original;
         var key = site.key;
         if (seenKeys.containsKey(key)) {
           final n = seenKeys[key]! + 1;

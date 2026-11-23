@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import '../core/logging/app_log.dart';
 import '../core/logging/log_redact.dart';
 import '../core/net/download_mirrors.dart';
+import 'bundled_runtime.dart';
 
 /// 管理 Yaozhil/mpv-Yaozhi 整合包：按需下载、解压、外部播放。
 class MpvExtension {
@@ -33,10 +34,18 @@ class MpvExtension {
 
   String? _exePath;
   Map<String, String> _meta = const {};
+  Future<void>? _bundled;
 
   Future<String> get _root async {
     final support = await getApplicationSupportDirectory();
-    return '${support.path}${Platform.pathSeparator}mpv-yaozhi';
+    final path = '${support.path}${Platform.pathSeparator}mpv-yaozhi';
+    await (_bundled ??= BundledRuntime.restore('mpv-yaozhi', Directory(path))
+        .then((_) {})
+        .catchError((Object error) {
+          _bundled = null;
+          throw error;
+        }));
+    return path;
   }
 
   Future<bool> get isInstalled async => (await executablePath).isNotEmpty;
@@ -333,6 +342,7 @@ class MpvExtension {
     if (await root.exists()) await root.delete(recursive: true);
     _exePath = null;
     _meta = const {};
+    _bundled = null;
   }
 
   /// 使用整合包内的 mpv.exe 打开链接（独立窗口）。

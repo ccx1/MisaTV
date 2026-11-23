@@ -10,6 +10,7 @@ class PyRuntimeProgress {
 class PyRuntime {
   PyRuntime._();
   static final instance = PyRuntime._();
+  static const version = '3.11.6';
 
   final ValueNotifier<PyRuntimeProgress?> progress = ValueNotifier(null);
   String? get installPath => null;

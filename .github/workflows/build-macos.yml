@@ -1,14 +1,11 @@
 name: Build macOS APP
 
-# 与 build-android.yml 保持一致：不在 push 时自动构建（macOS runner 计费倍率高，
-# 而且 macOS 版目前是首次适配，频率不需要那么高）。手动触发或发 Release 时出包。
 on:
+  workflow_call:
   workflow_dispatch:
-  release:
-    types: [published]
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: macos-build-${{ github.ref }}
@@ -68,7 +65,7 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP" MisaTV-macos-arm64.zip
           ls -lh MisaTV-macos-arm64.zip
           echo "--- 包内顶层 ---"
-          unzip -l MisaTV-macos-arm64.zip | head -8
+          unzip -Z1 MisaTV-macos-arm64.zip | sed -n '1,8p'
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
@@ -77,15 +74,6 @@ jobs:
           path: MisaTV-macos-arm64.zip
           if-no-files-found: error
           retention-days: 14
-
-      - name: 挂到 Release 资产
-        if: github.event_name == 'release'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
-            MisaTV-macos-arm64.zip --clobber
 
       - name: 失败时打印诊断
         if: failure()

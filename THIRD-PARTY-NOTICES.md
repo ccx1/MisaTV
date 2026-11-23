@@ -1,7 +1,7 @@
 # 第三方组件与许可
 
 MisaTV 本体代码以 GPL-3.0 发布（见 [LICENSE](LICENSE)）。仓库里还包含或依赖下列第三方内容，
-它们各自遵循原作者的许可；本文件按「随仓库分发 / 运行期按需下载 / 不随仓库分发」三类列出。
+它们各自遵循原作者的许可；本文件区分源码仓库内容、Windows 随包运行时与需自行准备的内容。
 
 ## 一、随仓库分发的第三方内容
 
@@ -19,13 +19,18 @@ MisaTV 本体代码以 GPL-3.0 发布（见 [LICENSE](LICENSE)）。仓库里还
 以及 `assets/jvm/` 下的 `*.jar`（`stubs` 为 TVBox 接口兼容桩、其余为对应 Java 源构建的 shim）
 均为本项目自建内容，随本仓库以 GPL-3.0 发布。
 
-## 二、运行期按需下载（不随仓库分发）
+## 二、Windows 完整发布包内置的运行时（不进入 Git 仓库）
+
+构建脚本从公开上游下载以下组件到 `assets/windows-runtimes/`，构建时复制为 EXE 同目录的 `runtimes/`。
+JRE 的 `legal/`、Python 的许可、wheels 的 `dist-info/` 与 MPV 原有许可文件随组件保留。
+首次启动只从本地初始化工作副本；没有内置包的源码构建仍支持按需下载。
 
 | 运行时 | 用途 | 来源与许可 |
 | --- | --- | --- |
 | JRE 17（Adoptium Temurin） | JAR / DEX 蜘蛛 | GPL-2.0 with Classpath Exception，<https://adoptium.net/> |
 | dex2jar | DEX → JAR 转换 | Apache-2.0，<https://github.com/pxb1988/dex2jar> |
 | CPython 3.11 embedded | PY 蜘蛛 | PSF License，<https://www.python.org/> |
+| requests / urllib3 / certifi / charset-normalizer / idna / lxml / beautifulsoup4 / soupsieve / pycryptodome / pyquery / cssselect / chardet / requests-toolbelt / typing-extensions / websocket-client / pywasm | Python 蜘蛛支持库 | 各包原许可（Apache-2.0 / MIT / BSD / MPL / LGPL 等）；准确版本与许可文件保留在随包 `Lib/site-packages/*dist-info/` 中，来源 <https://pypi.org/> |
 | unidbg 0.9.9 + dynarmic | 加固壳 ARM 桥 | Apache-2.0，<https://github.com/zhkl0228/unidbg> |
 | okhttp / okio / gson / jsoup / slf4j / bcprov / sqlite-jdbc | 蜘蛛支持库 | Apache-2.0 / MIT / EPL-1.0，取自 Maven 镜像 |
 | Yaozhi MPV 整合包 | 可选外部播放器 | GPL-2.0+，<https://github.com/Yaozhil/mpv-Yaozhi> |

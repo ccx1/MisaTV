@@ -10,6 +10,7 @@ import '../../core/logging/app_log.dart';
 import '../../core/net/download_mirrors.dart';
 import '../../core/net/runtime_fetch.dart';
 import '../../core/platform/archive_extract.dart';
+import '../bundled_runtime.dart';
 
 class PyRuntimeProgress {
   const PyRuntimeProgress(this.message, {this.value});
@@ -100,6 +101,7 @@ class PyRuntime {
     if (cached != null) return cached;
     final support = await getApplicationSupportDirectory();
     final dir = Directory(p.join(support.path, 'python', version));
+    await BundledRuntime.restore('python/$version', dir);
     _cachedDir = dir;
     return dir;
   }
@@ -248,6 +250,10 @@ class PyRuntime {
     final sitePackages = Directory(p.join(dir.path, 'Lib', 'site-packages'));
     sitePackages.createSync(recursive: true);
     final marker = File(p.join(sitePackages.path, '.kniephos-libs-v2'));
+    if (marker.existsSync() &&
+        _wheels.every((wheel) => _wheelInstalled(sitePackages, wheel))) {
+      return;
+    }
     if (!marker.existsSync()) {
       // 没有标记视为不完整/来源不明 → 清空重装（自愈旧版本装错 wheel 的目录）
       try {
@@ -286,10 +292,7 @@ class PyRuntime {
           );
         }
 
-        _setProgress(
-          '安装依赖 ${wheel.project}（$index/${_wheels.length}）…',
-          base,
-        );
+        _setProgress('安装依赖 ${wheel.project}（$index/${_wheels.length}）…', base);
         try {
           final url = await _resolveWheel(http, wheel, bases);
           if (url == null) throw StateError('镜像中未找到匹配的 wheel');

@@ -40,6 +40,7 @@ import '../../services/player/external_players.dart';
 import '../../services/py_runtime_service.dart';
 import '../../services/relay/local_relay.dart';
 import '../../services/runtime_extension.dart';
+import '../../services/bundled_runtime.dart';
 import '../../state/app_state.dart';
 import '../widgets/drive_cookie_dialog.dart';
 import '../widgets/drive_web_login_dialog.dart';
@@ -1460,7 +1461,9 @@ class SettingsPageState extends State<SettingsPage> {
                       collapsible: true,
                       initiallyExpanded: false,
                       trailing: Text(
-                        app.playerSettings.useFfmpeg ? 'FFmpeg/libmdk' : '系统 ExoPlayer',
+                        app.playerSettings.useFfmpeg
+                            ? 'FFmpeg/libmdk'
+                            : '系统 ExoPlayer',
                         style: theme.textTheme.labelSmall,
                       ),
                       summary: Text(
@@ -1468,7 +1471,9 @@ class SettingsPageState extends State<SettingsPage> {
                             ? '已启用 FFmpeg/libmdk 解码，兼容更多编码'
                             : '使用系统 ExoPlayer；如部分源放不动可开启',
                         style: theme.textTheme.labelSmall?.copyWith(
-                          color: theme.colorScheme.onSurface.withValues(alpha: 0.45),
+                          color: theme.colorScheme.onSurface.withValues(
+                            alpha: 0.45,
+                          ),
                         ),
                       ),
                       child: Column(
@@ -1493,7 +1498,9 @@ class SettingsPageState extends State<SettingsPage> {
                             '提示：若某源用系统播放器放不动，可开启本项；'
                             '若开启后画面异常或闪退，关掉即回落系统播放器。',
                             style: theme.textTheme.labelSmall?.copyWith(
-                              color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
+                              color: theme.colorScheme.onSurface.withValues(
+                                alpha: 0.5,
+                              ),
                             ),
                           ),
                         ],
@@ -1540,7 +1547,7 @@ class SettingsPageState extends State<SettingsPage> {
                           ),
                           title: const Text('边播边缓存'),
                           subtitle: const Text(
-                            '把已下行的分片存到本地：重看、拖回看过的位置直接读盘，不再回源',
+                            '保存 HLS 分片和 MP4 / MKV 已播放区间；回拖命中缓存时直接读盘',
                           ),
                           contentPadding: EdgeInsets.zero,
                         ),
@@ -1855,7 +1862,7 @@ class SettingsPageState extends State<SettingsPage> {
                         style: theme.textTheme.labelSmall,
                       ),
                       summary: Text(
-                        '第三方播放器、蜘蛛运行时、加固壳与标题字体按需下载',
+                        'Windows 完整版内置播放器与蜘蛛运行时；标题字体可按需下载',
                         style: theme.textTheme.labelSmall?.copyWith(
                           color: theme.colorScheme.onSurface.withValues(
                             alpha: 0.45,
