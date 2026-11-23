@@ -89,6 +89,26 @@ jobs:
       - name: 验证内置运行时离线可用
         run: flutter test --no-pub test/bundled_runtime_offline_test.dart
 
+      - uses: NuGet/setup-nuget@v2
+        with:
+          nuget-version: '6.x'
+
+      - name: 预装 WebView2 构建依赖
+        shell: pwsh
+        run: |
+          # WebView 插件的 MSBuild 工程在加载时导入这些包的 .targets。
+          # 版本与锁定的 flutter_inappwebview_windows 0.6.0 对齐。
+          $packages = @{
+            'Microsoft.Windows.ImplementationLibrary' = '1.0.231216.1'
+            'Microsoft.Web.WebView2' = '1.0.2792.45'
+            'nlohmann.json' = '3.11.2'
+          }
+          foreach ($package in $packages.GetEnumerator()) {
+            nuget install $package.Key -Version $package.Value -ExcludeVersion -NonInteractive `
+              -Source https://api.nuget.org/v3/index.json -OutputDirectory build/windows/x64/packages
+            if ($LASTEXITCODE -ne 0) { throw "安装 NuGet 包失败：$($package.Key)" }
+          }
+
       - name: 构建 Windows Release
         run: flutter build windows --release
 
