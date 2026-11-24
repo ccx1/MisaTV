@@ -1521,13 +1521,16 @@ class SettingsPageState extends State<SettingsPage> {
                     collapsible: true,
                     initiallyExpanded: false,
                     trailing: Text(
-                      app.playerSettings.streamCache ? '边播边缓存' : '不缓存',
+                      app.playerSettings.bufferByEpisode ? '按集缓冲' : '固定时长',
                       style: theme.textTheme.labelSmall,
                     ),
                     summary: Text(
-                      '预缓冲 ${app.playerSettings.bufferMinSec.toStringAsFixed(1)}s'
-                      ' · 最大 ${app.playerSettings.bufferMaxSec.toStringAsFixed(0)}s'
-                      ' · 缓存 ${app.playerSettings.streamCache ? '${app.playerSettings.streamCacheMb}MB' : '关'}',
+                      app.playerSettings.bufferByEpisode
+                          ? '预取后续 ${app.playerSettings.prefetchNextEpisodes} 集'
+                                ' · 缓存 ${app.playerSettings.streamCacheMb} MB'
+                          : '预缓冲 ${app.playerSettings.bufferMinSec.toStringAsFixed(1)}s'
+                                ' · 最大 ${app.playerSettings.bufferMaxSec.toStringAsFixed(0)}s'
+                                ' · 缓存 ${app.playerSettings.streamCache ? '${app.playerSettings.streamCacheMb}MB' : '关'}',
                       style: theme.textTheme.labelSmall?.copyWith(
                         color: theme.colorScheme.onSurface.withValues(
                           alpha: 0.45,
@@ -1537,27 +1540,48 @@ class SettingsPageState extends State<SettingsPage> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        _ActionRow(
-                          icon: Icons.memory_rounded,
-                          title: '播放缓冲',
-                          subtitle:
-                              '起播预缓冲 '
-                              '${app.playerSettings.bufferMinSec.toStringAsFixed(1)}s · '
-                              '最大缓冲 '
-                              '${app.playerSettings.bufferMaxSec.toStringAsFixed(0)}s',
-                          onTap: () => _editBufferSettings(context, app),
-                        ),
-                        SwitchListTile.adaptive(
-                          value: app.playerSettings.streamCache,
-                          onChanged: (v) => app.setPlayerSettings(
-                            app.playerSettings.copyWith(streamCache: v),
+                        if (!kIsWeb)
+                          _ActionRow(
+                            icon: Icons.tune_rounded,
+                            title: '缓冲模式',
+                            subtitle: app.playerSettings.bufferByEpisode
+                                ? '按集缓冲，优先缓存当前集'
+                                : '固定时长，使用播放器内存缓冲',
+                            onTap: () => _pickBufferMode(context, app),
                           ),
-                          title: const Text('边播边缓存'),
-                          subtitle: const Text(
-                            '保存 HLS 分片和 MP4 / MKV 已播放区间；回拖命中缓存时直接读盘',
+                        if (app.playerSettings.bufferByEpisode && !kIsWeb)
+                          _ActionRow(
+                            icon: Icons.playlist_add_rounded,
+                            title: '预取后续集数',
+                            subtitle:
+                                app.playerSettings.prefetchNextEpisodes == 0
+                                ? '仅当前集'
+                                : '当前集缓存完成后，预取后续 ${app.playerSettings.prefetchNextEpisodes} 集',
+                            onTap: () => _pickPrefetchEpisodes(context, app),
                           ),
-                          contentPadding: EdgeInsets.zero,
-                        ),
+                        if (!app.playerSettings.bufferByEpisode)
+                          _ActionRow(
+                            icon: Icons.memory_rounded,
+                            title: '播放缓冲',
+                            subtitle:
+                                '起播预缓冲 '
+                                '${app.playerSettings.bufferMinSec.toStringAsFixed(1)}s · '
+                                '最大缓冲 '
+                                '${app.playerSettings.bufferMaxSec.toStringAsFixed(0)}s',
+                            onTap: () => _editBufferSettings(context, app),
+                          ),
+                        if (!app.playerSettings.bufferByEpisode)
+                          SwitchListTile.adaptive(
+                            value: app.playerSettings.streamCache,
+                            onChanged: (v) => app.setPlayerSettings(
+                              app.playerSettings.copyWith(streamCache: v),
+                            ),
+                            title: const Text('边播边缓存'),
+                            subtitle: const Text(
+                              '保存 HLS 分片和 MP4 / MKV 已播放区间；回拖命中缓存时直接读盘',
+                            ),
+                            contentPadding: EdgeInsets.zero,
+                          ),
                         _ActionRow(
                           icon: Icons.sd_storage_outlined,
                           title: '缓存容量上限',

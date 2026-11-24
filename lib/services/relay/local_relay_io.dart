@@ -15,6 +15,7 @@ import '../live/live_ua_policy.dart';
 import '../drive/drive_descriptor.dart';
 import '../drive/quark_native.dart';
 import '../drive/uc_native.dart';
+import '../download/hls_playlist.dart';
 import '../spider_debug/spider_debug_service.dart';
 import '../torrent/bt_stream.dart';
 import 'm3u8_purify.dart';
@@ -23,6 +24,8 @@ import 'play_speed_meter.dart';
 import 'relay_access.dart';
 import 'relay_origin.dart';
 import 'stream_cache_io.dart';
+
+part 'playback_prefetch.dart';
 
 /// 本地 9978 中继：`/play` / `/file` / `/pkg` / `/img` / `/bt` / `/proxy?do=live`。
 ///
@@ -64,6 +67,26 @@ class LocalRelay {
 
   /// 边播边缓存的磁盘实现；未启用 / 未配置目录时为 null。
   StreamDiskCache? _streamCache;
+  bool Function() _episodeBufferEnabled = () => false;
+  final Set<PlaybackPrefetch> _prefetches = {};
+  int _foregroundPlayRequests = 0;
+
+  PlaybackPrefetch? startPlaybackPrefetch({
+    required bool Function() isPlaying,
+    required bool Function() isBuffering,
+  }) {
+    final cache = _streamCache;
+    if (!running || cache == null || !cache.enabled()) return null;
+    final task = PlaybackPrefetch._(this, cache, isPlaying, isBuffering);
+    _prefetches.add(task);
+    return task;
+  }
+
+  void _cancelPrefetches() {
+    for (final task in _prefetches.toList()) {
+      task.cancel();
+    }
+  }
 
   /// `/img` 的封面磁盘缓存：跨启动复用，避免每次打开都重新下载 200KB 图。
   ///
@@ -377,6 +400,7 @@ class LocalRelay {
     String Function()? cacheDir,
     bool Function()? cacheEnabled,
     int Function()? cacheLimitMb,
+    bool Function()? episodeBufferEnabled,
     Future<String?> Function(String token, int index)? externalEpisodeResolver,
   }) async {
     if (_server != null) return;
@@ -395,6 +419,7 @@ class LocalRelay {
             enabled: cacheEnabled ?? () => false,
             limitMb: cacheLimitMb ?? () => 1024,
           );
+    _episodeBufferEnabled = episodeBufferEnabled ?? () => false;
     // 启动后后台扫一遍缓存目录（设置页统计 / LRU 淘汰都靠它）。
     // 以前这一步压在首个分片请求上，历史缓存多时会把起播拖住。
     if (cacheEnabled?.call() == true) _streamCache?.warmUp();
@@ -439,10 +464,12 @@ class LocalRelay {
 
   /// 清空边播缓存目录。
   Future<void> clearStreamCache() async {
+    _cancelPrefetches();
     await _streamCache?.clear();
   }
 
   Future<void> stop() async {
+    _cancelPrefetches();
     final server = _server;
     _server = null;
     _port = 0;
@@ -615,7 +642,12 @@ class LocalRelay {
         AppLog.i('relay', '${request.method} $path');
       }
       if (path == '/play') {
-        return await _handlePlay(request, guardPrivate: browserRequest);
+        _foregroundPlayRequests++;
+        try {
+          return await _handlePlay(request, guardPrivate: browserRequest);
+        } finally {
+          _foregroundPlayRequests--;
+        }
       }
       if (path == '/file' || path.startsWith('/file/')) {
         return await _handleFile(request);
@@ -678,33 +710,20 @@ class LocalRelay {
     }
   }
 
-  Future<void> _handlePlay(
-    HttpRequest request, {
-    bool guardPrivate = false,
-  }) async {
-    final res = request.response;
-    final query = request.uri.queryParameters;
+  String _playTarget(Map<String, String> query) {
     var target = (query['url'] ?? query['u'] ?? '').trim();
     if (target.isEmpty) {
       final token = (query['p'] ?? '').trim();
       if (token.isNotEmpty) target = _playTargets[token] ?? '';
     }
-    if (target.isEmpty) return _text(res, 400, '缺少 url');
-    if (!RegExp(r'^https?://', caseSensitive: false).hasMatch(target)) {
-      return _text(res, 400, '只支持 http(s) 播放地址');
-    }
-    if (guardPrivate && RelayAccessPolicy.isPrivateTarget(target)) {
-      return _text(res, 403, '禁止访问本机/内网地址');
-    }
-    // ★ 僵尸播放器拦截：判死过、已换路的地址不再服务。
-    //
-    //   原生播放器杀不掉（见 _deadPlayTargets 的说明），它会一直发新请求。
-    //   这里直接回 410 —— 一条日志、零字节，不占 CDN 连接，也不污染探针。
-    if (isDeadPlayTarget(target)) {
-      AppLog.i('relay', '/play 拒绝僵尸请求（该地址已换路）${redactUrl(target)}');
-      return _text(res, 410, '该地址已切换到壳内取流');
-    }
-    final provider = (query['ck'] ?? '').trim();
+    return target;
+  }
+
+  Map<String, String> _playHeaders(
+    Map<String, String> query,
+    String provider,
+    String target,
+  ) {
     final headers = _headersFromQuery(query, provider);
     // ★ 百度 dlink 的防盗链按 UA 判定：浏览器 UA 恒定 403 31326/user is not authorized
     //   （winbox 真机实证），必须用网盘客户端 UA。jar 有时只给浏览器 UA，这里强制纠正。
@@ -770,6 +789,33 @@ class LocalRelay {
         _setHeader(headers, HttpHeaders.cookieHeader, merged);
       }
     }
+    return headers;
+  }
+
+  Future<void> _handlePlay(
+    HttpRequest request, {
+    bool guardPrivate = false,
+  }) async {
+    final res = request.response;
+    final query = request.uri.queryParameters;
+    final target = _playTarget(query);
+    if (target.isEmpty) return _text(res, 400, '缺少 url');
+    if (!RegExp(r'^https?://', caseSensitive: false).hasMatch(target)) {
+      return _text(res, 400, '只支持 http(s) 播放地址');
+    }
+    if (guardPrivate && RelayAccessPolicy.isPrivateTarget(target)) {
+      return _text(res, 403, '禁止访问本机/内网地址');
+    }
+    // ★ 僵尸播放器拦截：判死过、已换路的地址不再服务。
+    //
+    //   原生播放器杀不掉（见 _deadPlayTargets 的说明），它会一直发新请求。
+    //   这里直接回 410 —— 一条日志、零字节，不占 CDN 连接，也不污染探针。
+    if (isDeadPlayTarget(target)) {
+      AppLog.i('relay', '/play 拒绝僵尸请求（该地址已换路）${redactUrl(target)}');
+      return _text(res, 410, '该地址已切换到壳内取流');
+    }
+    final provider = (query['ck'] ?? '').trim();
+    final headers = _playHeaders(query, provider, target);
     final range = request.headers.value(HttpHeaders.rangeHeader);
     final cacheKey = StreamDiskCache.keyOf(target);
 
@@ -812,7 +858,12 @@ class LocalRelay {
     if (!manifest && request.method == 'GET') {
       final cached = clamped == null
           ? await _streamCache?.lookup(cacheKey)
-          : await _streamCache?.lookupRange(cacheKey, clamped);
+          : await _streamCache?.lookupRange(
+              cacheKey,
+              clamped,
+              allowPrefix:
+                  range?.endsWith('-') == true && _episodeBufferEnabled(),
+            );
       if (cached != null) {
         res.statusCode = cached.contentRange.isEmpty ? 200 : 206;
         res.headers.set(HttpHeaders.contentTypeHeader, cached.contentType);
@@ -942,27 +993,7 @@ class LocalRelay {
       return;
     }
     if (looksM3u8 && request.method != 'HEAD' && upstream.statusCode < 400) {
-      var bytes = await _readLimited(upstream);
-      final encoding = _responseHeader(
-        upstream,
-        HttpHeaders.contentEncodingHeader,
-      ).toLowerCase();
-      if (encoding.contains('gzip')) {
-        try {
-          bytes = gzip.decode(bytes);
-        } catch (_) {
-          // 解压失败按原文处理
-        }
-      }
-      var text = utf8.decode(bytes, allowMalformed: true);
-      if (_purifyEnabled() && text.startsWith('#EXTM3U')) {
-        final result = purifyVodM3u8(
-          text,
-          finalUrl,
-          rules: hostRegexFor(finalUrl, _rules()),
-        );
-        if (result != null && result.removed > 0) text = result.text;
-      }
+      final text = await _readHls(upstream, finalUrl);
       final rewritten = _rewritePlaylist(text, finalUrl, headers, provider);
       res.statusCode = 200;
       res.headers.set('content-type', 'application/vnd.apple.mpegurl');
@@ -2485,7 +2516,7 @@ class LocalRelay {
     } on HandshakeException catch (e) {
       // 视频 CDN 常见「证书链缺中间证书 / 自签」：浏览器播放器通常放行，
       // Dart 的严格校验会直接拒绝。仅对无副作用的 GET/HEAD 用兼容客户端重试一次。
-      if (method != 'GET' && method != 'HEAD') rethrow;
+      if (client != null || (method != 'GET' && method != 'HEAD')) rethrow;
       final host = Uri.tryParse(url)?.host ?? '';
       AppLog.w('relay', 'TLS 证书校验失败，改用兼容模式重试 host=$host | $e');
       final insecure = _insecureClient ??= HttpClient()
@@ -2607,12 +2638,14 @@ class LocalRelay {
     required String method,
     String? range,
     required String provider,
+    HttpClient? client,
   }) async {
     var opened = await _open(
       url,
       headers: headers,
       method: method,
       range: range,
+      client: client,
     );
     if (provider.isEmpty) return opened;
     _rememberPlayCookies(provider, opened.response);
@@ -2643,7 +2676,13 @@ class LocalRelay {
       '/play ${opened.response.statusCode} → 用刷新后的 Cookie 重试一次 '
           'provider=$provider',
     );
-    opened = await _open(url, headers: headers, method: method, range: range);
+    opened = await _open(
+      url,
+      headers: headers,
+      method: method,
+      range: range,
+      client: client,
+    );
     _rememberPlayCookies(provider, opened.response);
     return opened;
   }
@@ -2807,6 +2846,25 @@ class LocalRelay {
     } catch (_) {
       return raw;
     }
+  }
+
+  Future<String> _readHls(HttpClientResponse response, String url) async {
+    var bytes = await _readLimited(response);
+    final encoding = _responseHeader(
+      response,
+      HttpHeaders.contentEncodingHeader,
+    ).toLowerCase();
+    if (encoding.contains('gzip')) {
+      try {
+        bytes = gzip.decode(bytes);
+      } catch (_) {
+        // 解压失败按原文处理
+      }
+    }
+    final text = utf8.decode(bytes, allowMalformed: true);
+    if (!_purifyEnabled() || !text.startsWith('#EXTM3U')) return text;
+    final result = purifyVodM3u8(text, url, rules: hostRegexFor(url, _rules()));
+    return result != null && result.removed > 0 ? result.text : text;
   }
 
   Future<List<int>> _readLimited(

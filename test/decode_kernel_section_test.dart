@@ -103,4 +103,38 @@ void main() {
       debugDefaultTargetPlatformOverride = null;
     }
   });
+
+  testWidgets('Windows 设置可启用按集缓冲并保存预取集数', (tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      final app = await _app();
+      await _openPlaySection(tester, app);
+
+      final cacheSection = find.text('缓冲与缓存');
+      await tester.ensureVisible(cacheSection);
+      await tester.tap(cacheSection);
+      await tester.pumpAndSettle();
+      expect(find.text('预取后续集数'), findsNothing);
+
+      final mode = find.text('缓冲模式');
+      await tester.ensureVisible(mode);
+      await tester.tap(mode);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('按集缓冲'));
+      await tester.pumpAndSettle();
+
+      final prefetch = find.text('预取后续集数');
+      await tester.ensureVisible(prefetch);
+      await tester.tap(prefetch);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('后续 2 集'));
+      await tester.pumpAndSettle();
+
+      final saved = app.store.loadPlayerSettings();
+      expect(saved.bufferByEpisode, isTrue);
+      expect(saved.prefetchNextEpisodes, 2);
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 }

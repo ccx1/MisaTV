@@ -67,6 +67,23 @@ void main() {
     expect(File('${target.path}/python.exe').existsSync(), isTrue);
   });
 
+  test('工作副本被另一窗口锁定时异步等待，释放后恢复', () async {
+    target.createSync(recursive: true);
+    final lock = File('${target.path}/.bundled-runtime.lock')
+        .openSync(mode: FileMode.append);
+    lock.lockSync();
+    final task = restore();
+    try {
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+      expect(File('${target.path}/python.exe').existsSync(), isFalse);
+    } finally {
+      lock.closeSync();
+      await task;
+    }
+    expect(await task, isTrue);
+    expect(File('${target.path}/python.exe').existsSync(), isTrue);
+  }, skip: !Platform.isWindows);
+
   test('已有标记但程序损坏时从随包原件恢复', () async {
     await restore();
     File('${target.path}/python.exe').writeAsStringSync('broken');

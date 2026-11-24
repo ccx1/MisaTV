@@ -113,9 +113,6 @@ Future<void> _bootstrap(List<String> args) async {
     return true;
   };
   AppLog.i('app', '日志目录: ${AppLog.directory}');
-  if (!kIsWeb && supportPath != null) {
-    await BundledRuntime.initialize(supportPath);
-  }
 
   // 沉浸 Hero 的可选字体包：后台恢复已安装字体，不阻塞首屏。
   unawaited(HeroFontService.instance.init());
@@ -200,8 +197,9 @@ Future<void> _bootstrap(List<String> args) async {
       jvmProxyPort: () => sourceService.jar.activeHostProxyPort,
       // 边播边缓存：目录固定放在应用数据下，开关与容量上限跟着设置实时走。
       cacheDir: () => p.join(support, 'cache', 'stream'),
-      cacheEnabled: () => state.playerSettings.streamCache,
+      cacheEnabled: () => state.playerSettings.effectiveStreamCache,
       cacheLimitMb: () => state.playerSettings.streamCacheMb,
+      episodeBufferEnabled: () => state.playerSettings.bufferByEpisode,
       externalEpisodeResolver: externalPlaylist.resolveEpisode,
     );
     // 蜘蛛调试口默认关闭：只有 `--dart-define=MISA_SPIDER_DEBUG=true` 的构建
@@ -281,6 +279,17 @@ Future<void> _bootstrap(List<String> args) async {
           : null,
     ),
   );
+  final runtimeSupportPath = supportPath;
+  if (!kIsWeb && runtimeSupportPath != null) {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      unawaited(
+        BundledRuntime.initialize(runtimeSupportPath)
+            .catchError((Object error, StackTrace stack) {
+              AppLog.e('runtime', '后台准备内置运行时失败', error, stack);
+            }),
+      );
+    });
+  }
   // 首帧之后才初始化托盘 / 老板键：此时窗口与消息循环都已就绪，
   // 原生托盘 API 才能安全调用（原因见上面 `bossKey` 处的注释）。
   if (bossKey != null) {

@@ -1,6 +1,6 @@
-import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
 
 import 'package:path/path.dart' as p;
 
@@ -74,15 +74,14 @@ class BundledRuntime {
       return Future.value(false);
     }
     final key = '${source.path}|${destination.path}';
+    final refreshJre =
+        relative.startsWith('jvm/') &&
+        !relative.startsWith('jvm/native/') &&
+        _isStandard(bundle);
     return _restoring.putIfAbsent(key, () async {
       try {
-        return await _restore(
-          source,
-          destination,
-          refreshJre:
-              relative.startsWith('jvm/') &&
-              !relative.startsWith('jvm/native/') &&
-              _isStandard(bundle),
+        return await Isolate.run(
+          () => _restore(source, destination, refreshJre: refreshJre),
         );
       } finally {
         _restoring.remove(key);
@@ -90,24 +89,46 @@ class BundledRuntime {
     });
   }
 
-  static Future<bool> _restore(
+  static bool _restore(
     Directory source,
     Directory destination, {
     required bool refreshJre,
-  }) async {
+  }) {
     final manifest = File(p.join(source.path, 'bundle.json'));
-    if (!await manifest.exists()) return false;
-    final data = jsonDecode(await manifest.readAsString()) as Map;
+    if (!manifest.existsSync()) return false;
+    final data = jsonDecode(manifest.readAsStringSync()) as Map;
     final files = Map<String, dynamic>.from(data['files'] as Map);
-    final required = (data['required'] as List).cast<String>();
+    final required = (data['required'] as List).cast<String>().toSet();
+    final revision = data['revision'] as String;
+    destination.createSync(recursive: true);
+    // 主窗口与独立播放器各有 isolate，用文件锁共享同一份工作副本。
+    final lock = File(p.join(destination.path, '.bundled-runtime.lock'))
+        .openSync(mode: FileMode.append);
+    try {
+      lock.lockSync(FileLock.blockingExclusive);
+      _restoreFiles(source, destination, files, required, revision, refreshJre);
+      return true;
+    } finally {
+      lock.closeSync();
+    }
+  }
+
+  static void _restoreFiles(
+    Directory source,
+    Directory destination,
+    Map<String, dynamic> files,
+    Set<String> required,
+    String revision,
+    bool refreshJre,
+  ) {
     final marker = File(p.join(destination.path, '.bundled-runtime'));
-    if (await marker.exists() &&
-        await marker.readAsString() == data['revision'] &&
+    if (marker.existsSync() &&
+        marker.readAsStringSync() == revision &&
         required.every((name) {
           final file = File(p.join(destination.path, name));
           return file.existsSync() && file.lengthSync() == files[name];
         })) {
-      return true;
+      return;
     }
     final createdDirectories = <String>{};
     for (final entry in files.entries) {
@@ -136,7 +157,6 @@ class BundledRuntime {
         if (temp.existsSync()) temp.deleteSync();
       }
     }
-    await marker.writeAsString(data['revision'] as String, flush: true);
-    return true;
+    marker.writeAsStringSync(revision, flush: true);
   }
 }

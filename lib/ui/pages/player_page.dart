@@ -329,6 +329,11 @@ class _PlayerPageState extends State<PlayerPage>
   /// 静音前的音量，取消静音时恢复。
   double _lastVolume = 1.0;
   int _openSeq = 0;
+  PlaybackPrefetch? _playbackPrefetch;
+  double _episodeBufferFraction = 0;
+  String? _prefetchUrl;
+  (int, int, bool)? _prefetchSettings;
+  final _prefetchedPlays = <String, ({PlayResult play, DateTime at})>{};
   Timer? _hideTimer;
   Timer? _saveTimer;
 
@@ -459,6 +464,20 @@ class _PlayerPageState extends State<PlayerPage>
     if (_opened) {
       // 设置页改了缓冲参数：当前播放器立刻跟随，不必等下一集起播。
       final settings = _app.playerSettings;
+      if (!settings.bufferByEpisode) {
+        _stopPlaybackPrefetch();
+        _prefetchedPlays.clear();
+      } else if (_prefetchUrl case final url?) {
+        final config = (
+          settings.prefetchNextEpisodes,
+          settings.streamCacheMb,
+          settings.m3u8Purify,
+        );
+        if (config != _prefetchSettings) {
+          _stopPlaybackPrefetch();
+          _startPlaybackPrefetch(url);
+        }
+      }
       if (settings.bufferMinSec != _lastAppliedBufferMin ||
           settings.bufferMaxSec != _lastAppliedBufferMax) {
         _lastAppliedBufferMin = settings.bufferMinSec;
@@ -544,6 +563,10 @@ class _PlayerPageState extends State<PlayerPage>
         'player',
         '播放内核报错：$_error url=${redactUrl(_currentPlay?.url ?? '')}',
       );
+    }
+    if (value.hasError || live) {
+      _stopPlaybackPrefetch();
+      _prefetchUrl = null;
     }
     if (value.hasError && !_autoErrorHandled && !_autoSwitching) {
       _autoErrorHandled = true;
@@ -634,6 +657,12 @@ class _PlayerPageState extends State<PlayerPage>
     // 同一集正在取链时重复点击直接忽略：否则会并发拉多个常驻取流进程、
     // 同时初始化多个 controller，最后真的会同时播放好几份。
     if (play == null && _loadingIndex == index) return false;
+    _stopPlaybackPrefetch();
+    _prefetchUrl = null;
+    final prefetchKey = _episodePrefetchKey(_episodes[index].url);
+    final prefetched = !bypassRelay && _app.playerSettings.bufferByEpisode
+        ? _prefetchedPlays.remove(prefetchKey)
+        : null;
     final seq = ++_openSeq;
     if (play == null) {
       _loadingIndex = index;
@@ -644,7 +673,13 @@ class _PlayerPageState extends State<PlayerPage>
     }
     PlayResult? resolved;
     try {
-      resolved = play ?? await _resolve(index);
+      resolved =
+          play ??
+          (prefetched != null &&
+                  DateTime.now().difference(prefetched.at) <
+                      const Duration(minutes: 30)
+              ? prefetched.play
+              : await _resolve(index));
     } catch (e) {
       if (seq != _openSeq || !mounted) return false;
       if (play == null) _loadingIndex = null;
@@ -991,6 +1026,10 @@ class _PlayerPageState extends State<PlayerPage>
       });
       _syncSleepInhibitor();
       _syncAudioTracks(controller);
+      if (!live && !bypassRelay) {
+        _prefetchUrl = source.url;
+        _startPlaybackPrefetch(source.url);
+      }
       if (!bypassRelay &&
           PlayPageUnwrap.isRangeThrottledDriveCdn(target.url)) {
         _watchDriveThroughput(
@@ -1426,6 +1465,100 @@ class _PlayerPageState extends State<PlayerPage>
     } finally {
       _driveSwitchInFlight = false;
     }
+  }
+
+  String _episodePrefetchKey(String url) =>
+      '${_site.key}\n${_detail.id}\n$_flag\n$url';
+
+  void _stopPlaybackPrefetch() {
+    _playbackPrefetch?.cancel();
+    _playbackPrefetch = null;
+    _episodeBufferFraction = 0;
+    _prefetchSettings = null;
+  }
+
+  void _startPlaybackPrefetch(String url) {
+    if (!_app.playerSettings.bufferByEpisode ||
+        _live ||
+        _handedToExternalPlayer) {
+      return;
+    }
+    final task = LocalRelay.instance.startPlaybackPrefetch(
+      isPlaying: () => _controller?.value.isPlaying ?? false,
+      isBuffering: () => _buffering,
+    );
+    if (task == null) return;
+    _playbackPrefetch = task;
+    final settings = _app.playerSettings;
+    _prefetchSettings = (
+      settings.prefetchNextEpisodes,
+      settings.streamCacheMb,
+      settings.m3u8Purify,
+    );
+    final site = _site;
+    final flag = _flag;
+    final index = _index;
+    final episodes = _episodes;
+    final episodeKeys = [
+      for (final episode in episodes.skip(index + 1).take(3))
+        _episodePrefetchKey(episode.url),
+    ];
+    _prefetchedPlays.removeWhere((key, _) => !episodeKeys.contains(key));
+    unawaited(() async {
+      final cached = await task.episode(
+        url,
+        onProgress: (fraction) {
+          if (!mounted || !identical(_playbackPrefetch, task)) return;
+          setState(() => _episodeBufferFraction = fraction);
+        },
+      );
+      if (!cached || site.isJarSpider || site.isPySpider) {
+        return;
+      }
+      for (var offset = 0; offset < episodeKeys.length; offset++) {
+        if (offset >= _app.playerSettings.prefetchNextEpisodes ||
+            !await task.waitForBandwidth()) {
+          return;
+        }
+        try {
+          final rawUrl = episodes[index + offset + 1].url;
+          final key = episodeKeys[offset];
+          final previous = _prefetchedPlays[key];
+          final reusable =
+              previous != null &&
+              DateTime.now().difference(previous.at) <
+                  const Duration(minutes: 30);
+          final play = reusable
+              ? previous.play
+              : await _app.unwrapPlayPage(
+                  await _app.sourceService.resolvePlay(
+                    site: site,
+                    config: _app.config ?? const SiteConfig(),
+                    flag: flag,
+                    rawUrl: rawUrl,
+                    jarReady: _app.jarReady,
+                  ),
+                );
+          if (!task.active ||
+              offset >= _app.playerSettings.prefetchNextEpisodes ||
+              !play.playable ||
+              play.parse != 0 ||
+              play.externalLink.isNotEmpty) {
+            return;
+          }
+          final source = _app.preparePlay(play, forceRelay: true);
+          if (!await task.episode(source.url)) return;
+          if (!task.active) return;
+          _prefetchedPlays[key] = (
+            play: play,
+            at: reusable ? previous.at : DateTime.now(),
+          );
+        } catch (_) {
+          // 正常切集时仍可重新取链。
+          return;
+        }
+      }
+    }());
   }
 
   Future<PlayResult?> _resolve(int index) async {
@@ -2217,6 +2350,8 @@ class _PlayerPageState extends State<PlayerPage>
   }
 
   Future<void> _exitPage() async {
+    _stopPlaybackPrefetch();
+    _prefetchUrl = null;
     // 独立窗口关闭后主窗口会重新读盘，先把最后进度落下来。
     try {
       await _saveProgress();
@@ -2233,6 +2368,7 @@ class _PlayerPageState extends State<PlayerPage>
 
   @override
   void dispose() {
+    _stopPlaybackPrefetch();
     // 离开播放器即作废睡眠定时器：它的作用域就是这一集，不该在后台继续倒计时。
     _sleepTimer.dispose();
     _bufferingHintTimer?.cancel();
@@ -2695,15 +2831,17 @@ class _PlayerPageState extends State<PlayerPage>
     return ahead.inMilliseconds <= 0 ? null : ahead.inMilliseconds / 1000;
   }
 
-  /// 已缓冲到的位置（毫秒）：取所有 buffered range 里最靠后的 end。
+  /// 原进度条显示内核缓冲与当前集连续落盘进度中较靠后的位置。
   double _bufferedEndMs() {
     final value = _controller?.value;
-    if (value == null || value.buffered.isEmpty) return 0;
-    var end = Duration.zero;
+    if (value == null) return 0;
+    var end = value.duration.inMilliseconds.toDouble() *
+        (_playbackPrefetch?.active == true ? _episodeBufferFraction : 0.0);
     for (final range in value.buffered) {
-      if (range.end > end) end = range.end;
+      final rangeEnd = range.end.inMilliseconds.toDouble();
+      if (rangeEnd > end) end = rangeEnd;
     }
-    return end.inMilliseconds.toDouble();
+    return end;
   }
 
   /// 把设置里的「起播预缓冲 / 最大缓冲」写进 fvp（libmdk）内核。
@@ -3352,55 +3490,33 @@ class _PlayerPageState extends State<PlayerPage>
                           // 左键按下（拖动 / 跳转）就放弃还没执行的右键取点。
                           _cancelPendingSkipPick();
                         },
-                        child: Stack(
-                          alignment: Alignment.center,
-                          children: [
-                            // 已缓冲区间：画在轨道下方，位置与 Slider 可见轨道对齐
-                            // （两端各内缩 overlay 半径 12）。
-                            Positioned.fill(
-                              child: IgnorePointer(
-                                child: CustomPaint(
-                                  painter: _BufferedBarPainter(
-                                    played: total <= 0
-                                        ? 0
-                                        : (value / total).clamp(0.0, 1.0),
-                                    buffered: total <= 0
-                                        ? 0
-                                        : (_bufferedEndMs() / total).clamp(
-                                            0.0,
-                                            1.0,
-                                          ),
-                                    inset: 12,
-                                  ),
-                                ),
-                              ),
+                        child: SliderTheme(
+                          data: SliderTheme.of(context).copyWith(
+                            trackHeight: 3,
+                            thumbShape: const RoundSliderThumbShape(
+                              enabledThumbRadius: 6,
                             ),
-                            SliderTheme(
-                              data: SliderTheme.of(context).copyWith(
-                                trackHeight: 3,
-                                thumbShape: const RoundSliderThumbShape(
-                                  enabledThumbRadius: 6,
-                                ),
-                                overlayShape: const RoundSliderOverlayShape(
-                                  overlayRadius: 12,
-                                ),
-                                activeTrackColor: Colors.white,
-                                inactiveTrackColor: Colors.white24,
-                                thumbColor: Colors.white,
-                              ),
-                              child: Slider(
-                                value: value,
-                                max: total.toDouble(),
-                                onChanged: (v) => setState(
-                                  () => _position = Duration(
-                                    milliseconds: v.round(),
-                                  ),
-                                ),
-                                onChangeEnd: (v) =>
-                                    _seekTo(Duration(milliseconds: v.round())),
-                              ),
+                            overlayShape: const RoundSliderOverlayShape(
+                              overlayRadius: 12,
                             ),
-                          ],
+                            activeTrackColor: Colors.white,
+                            secondaryActiveTrackColor: Colors.white60,
+                            inactiveTrackColor: Colors.white24,
+                            thumbColor: Colors.white,
+                          ),
+                          child: Slider(
+                            value: value,
+                            max: total.toDouble(),
+                            secondaryTrackValue: _bufferedEndMs().clamp(
+                              value,
+                              total.toDouble(),
+                            ),
+                            onChanged: (v) => setState(
+                              () => _position = Duration(milliseconds: v.round()),
+                            ),
+                            onChangeEnd: (v) =>
+                                _seekTo(Duration(milliseconds: v.round())),
+                          ),
                         ),
                       ),
                     ),
@@ -3854,49 +3970,3 @@ class _MediaStats {
   final int audioChannels;
   final String format;
 }
-
-/// 进度条上的「已缓冲」条：从播放位置画到缓冲区末尾。
-///
-/// 与 Slider 的可见轨道对齐：轨道两端各内缩 overlay 半径（这里 12），
-/// 否则缓冲条会比轨道宽出一截，看起来像错位。
-class _BufferedBarPainter extends CustomPainter {
-  const _BufferedBarPainter({
-    required this.played,
-    required this.buffered,
-    required this.inset,
-  });
-
-  /// 已播放比例（0–1）。
-  final double played;
-
-  /// 已缓冲比例（0–1）。
-  final double buffered;
-
-  /// 轨道两端的缩进（= SliderTheme.overlayShape 的半径）。
-  final double inset;
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final track = size.width - inset * 2;
-    if (track <= 0 || buffered <= played) return;
-    final left = inset + track * played;
-    final right = inset + track * buffered;
-    final centerY = size.height / 2;
-    final rect = Rect.fromLTRB(left, centerY - 1.5, right, centerY + 1.5);
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(rect, const Radius.circular(2)),
-      Paint()..color = Colors.white.withValues(alpha: 0.45),
-    );
-  }
-
-  @override
-  bool shouldRepaint(covariant _BufferedBarPainter oldDelegate) =>
-      oldDelegate.played != played ||
-      oldDelegate.buffered != buffered ||
-      oldDelegate.inset != inset;
-}
-
-
-
-
-

@@ -5,9 +5,13 @@
 ## 开始任务
 
 1. 先查看 `git status --short` 和相关文件的差异，区分已有改动与本次任务。保留用户及其他任务的未提交代码、资源和文档；不要通过重置、清理或整文件回滚覆盖它们。
-2. 阅读 [README.md](README.md) 了解功能与平台边界，再按任务查阅 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) 的对应章节。本文记录关键约束，具体实现以当前源码为准。
-3. 使用 `rg` 定位入口，限制搜索范围。`work/`、`build/`、`.dart_tool/` 和 `assets/windows-runtimes/` 包含本地工具、缓存或大体积二进制，不应纳入普通源码扫描。
-4. 明确实际故障、预期行为与验证办法，再做必要改动；避免顺手重构、批量格式化和无关依赖升级。新增逻辑优先沿用项目现有方式。
+2. 每次开始改动前，先执行 `git fetch fork main`，再用 `git merge-base --is-ancestor fork/main HEAD` 检查当前分支是否已包含 fork 最新的 `main`。
+   - 当前分支已包含最新 `main` 时，直接在当前分支继续。
+   - 最新 `main` 有当前分支尚未包含的提交时，先以最新 `fork/main` 检出工作区，再开始修改。继续已有任务时，保留并迁移该任务的提交、未提交改动和新增文件，核对完整后再构建。
+   - 拉取失败时重试，根据实际结果说明能否确认最新基线。
+3. 阅读 [README.md](README.md) 了解功能与平台边界，再按任务查阅 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) 的对应章节。本文记录关键约束，具体实现以当前源码为准。
+4. 使用 `rg` 定位入口，限制搜索范围。`work/`、`build/`、`.dart_tool/` 和 `assets/windows-runtimes/` 包含本地工具、缓存或大体积二进制，不应纳入普通源码扫描。
+5. 明确实际故障、预期行为与验证办法，再做必要改动；避免顺手重构、批量格式化和无关依赖升级。新增逻辑优先沿用项目现有方式。
 
 使用中文沟通和编写维护说明，标识符沿用现有代码风格。文档采用 UTF-8，不记录 Cookie、Token、密码、真实订阅内容或本机登录数据。
 
@@ -48,7 +52,7 @@ MisaTV 是 Flutter 编写的 TVBox 客户端，Windows x64 是主要交付平台
 
 1. `tool/prepare_windows_runtimes.ps1` 在构建机下载并检查公开依赖，生成 `assets/windows-runtimes/`，含各组件 `bundle.json` 和总清单 `ready.json`。
 2. `windows/CMakeLists.txt` 把准备好的内容复制到 EXE 同目录的 `runtimes/`。这不是 Flutter 通用资源，不能因此把 Windows 二进制塞进 Android / Web 包。
-3. `lib/services/bundled_runtime.dart` 从随包原件初始化可写的工作副本；主窗口和独立播放器都要接入。默认工作目录为 `userdata/`，安装目录不可写时使用系统应用数据目录。
+3. 主窗口首帧后通过 `lib/services/bundled_runtime.dart` 在后台准备随包运行时。主窗口和独立播放器通过各组件的使用入口按需等待工作副本。复制在独立 isolate 中执行，文件锁协调两个窗口对同一工作副本的访问。默认工作目录为 `userdata/`，安装目录不可写时使用系统应用数据目录。
 4. 设置页识别随包组件并显示「已内置」。缺少内置包的源码构建保留既有下载修复流程；完整包初始化不应访问网络。
 
 维护要求：
@@ -125,7 +129,7 @@ flutter build windows --release
 - Fork 的应用与发布版本采用 `X.Y.Z.R`。前三段是所基于的官方版本，第四段从 `1` 开始，同一官方版本内逐次递增。基于官方 `1.2.0` 时依次用 `1.2.0.1`、`1.2.0.2`。跟进官方 `1.3.0` 后从 `1.3.0.1` 开始。
 - `lib/core/app_version.dart` 的 `kAppVersion` 记录完整四段版本，GitHub Release 和标签使用 `vX.Y.Z.R`。Flutter 的 `pubspec.yaml` 保持 `X.Y.Z+N` 格式，前三段与应用版本一致，平台构建编号 `N` 随每次新发布递增。
 - 校验应用版本与 Flutter 版本的一致性。普通修复或文档任务不自动升级版本。
-- 新任务从目标分支创建 `feature/ccx_yyyyMMdd_<改动缩写>` 分支。日期使用创建当天的八位年月日，末尾使用能识别本次改动的简短缩写，例如 `feature/ccx_20261124_sync130`。已有任务沿用其分支。
+- 需要新建任务分支时，从最新 `fork/main` 创建 `feature/ccx_yyyyMMdd_<改动缩写>` 分支。日期使用创建当天的八位年月日，末尾使用能识别本次改动的简短缩写，例如 `feature/ccx_20261124_sync130`。
 - 提交时仅暂存本次任务相关文件。推送只推任务分支，由用户创建和合并 Pull Request。每次提交并推送都要对任务分支的提交构建 Release 产物，可使用本地构建或在 GitHub Actions 手动运行 Windows 构建工作流。
 - 正式版本随 Pull Request 合入 fork 的 `main` 后发布。发布 PR 需递增应用版本和 Flutter 构建编号，并随提交提供 `docs/releases/vX.Y.Z.R.md`。用中文写清相对上一个正式版本的用户可见变化、修复和适用平台，必要时说明升级方式或兼容性变化。
 - **Build and publish Release** 读取对应版本的 Markdown 作为 GitHub Release 正文。发布后核验正文、发布资产与 SHA-256。

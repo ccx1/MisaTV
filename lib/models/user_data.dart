@@ -388,6 +388,8 @@ class PlayerSettings {
     this.bufferTuned = false,
     this.streamCache = false,
     this.streamCacheMb = 1024,
+    this.bufferByEpisode = false,
+    this.prefetchNextEpisodes = 0,
     this.fit = 'contain',
     this.jsWorkerPool = false,
     this.keepSpiderHosts = false,
@@ -482,6 +484,8 @@ class PlayerSettings {
     bool? bufferTuned,
     bool? streamCache,
     int? streamCacheMb,
+    bool? bufferByEpisode,
+    int? prefetchNextEpisodes,
     String? fit,
     bool? jsWorkerPool,
     bool? keepSpiderHosts,
@@ -516,6 +520,9 @@ class PlayerSettings {
     bufferTuned: bufferTuned ?? this.bufferTuned,
     streamCache: streamCache ?? this.streamCache,
     streamCacheMb: streamCacheMb ?? this.streamCacheMb,
+    bufferByEpisode: bufferByEpisode ?? this.bufferByEpisode,
+    prefetchNextEpisodes: (prefetchNextEpisodes ?? this.prefetchNextEpisodes)
+        .clamp(0, 3),
     fit: fit ?? this.fit,
     jsWorkerPool: jsWorkerPool ?? this.jsWorkerPool,
     keepSpiderHosts: keepSpiderHosts ?? this.keepSpiderHosts,
@@ -552,6 +559,11 @@ class PlayerSettings {
 
   /// 边播边缓存容量上限（MB），超出按最久未用淘汰。
   final int streamCacheMb;
+
+  final bool bufferByEpisode;
+  final int prefetchNextEpisodes;
+
+  bool get effectiveStreamCache => streamCache || bufferByEpisode;
 
   /// JS 蜘蛛并行（实验，默认关）：开启后最多 3 只 QuickJS 执行器，
   /// 多 JS 源搜索/浏览不用再排同一个 isolate 的队。
@@ -595,6 +607,8 @@ class PlayerSettings {
     'bufferTuned': bufferTuned,
     'streamCache': streamCache,
     'streamCacheMb': streamCacheMb,
+    'bufferByEpisode': bufferByEpisode,
+    'prefetchNextEpisodes': prefetchNextEpisodes,
     'fit': fit,
     'jsWorkerPool': jsWorkerPool,
     'keepSpiderHosts': keepSpiderHosts,
@@ -655,6 +669,9 @@ class PlayerSettings {
     streamCacheMb: ((j['streamCacheMb'] as num?)?.toInt() ?? 1024)
         .clamp(128, 16384)
         .toInt(),
+    bufferByEpisode: j['bufferByEpisode'] == true,
+    prefetchNextEpisodes: ((j['prefetchNextEpisodes'] as num?)?.toInt() ?? 0)
+        .clamp(0, 3),
     fit: normalizePlayerFit((j['fit'] ?? '').toString()).name,
     jsWorkerPool: (j['jsWorkerPool'] as bool?) ?? false,
     keepSpiderHosts: (j['keepSpiderHosts'] as bool?) ?? false,

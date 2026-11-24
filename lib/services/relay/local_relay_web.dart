@@ -18,6 +18,7 @@ class LocalRelay {
     String Function()? cacheDir,
     bool Function()? cacheEnabled,
     int Function()? cacheLimitMb,
+    bool Function()? episodeBufferEnabled,
   }) async {}
 
   Future<void> stop() async {}
@@ -28,7 +29,13 @@ class LocalRelay {
 
   String get streamCacheDir => '';
 
+  PlaybackPrefetch? startPlaybackPrefetch({
+    required bool Function() isPlaying,
+    required bool Function() isBuffering,
+  }) => null;
+
   Future<void> clearStreamCache() async {}
+
 
   void clearPlaySession([String? provider]) {}
 
@@ -37,4 +44,14 @@ class LocalRelay {
     Map<String, String> headers = const {},
     String provider = '',
   }) => url;
+}
+
+class PlaybackPrefetch {
+  bool get active => false;
+  void cancel() {}
+  Future<bool> waitForBandwidth() async => false;
+  Future<bool> episode(
+    String url, {
+    void Function(double fraction)? onProgress,
+  }) async => false;
 }
