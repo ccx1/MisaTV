@@ -266,11 +266,21 @@ Future<void> _bootstrap(List<String> args) async {
     onClosed: state.reloadUserDataFromStore,
   );
 
-  final fullUpdate = args.length == 1
-      ? RegExp(r'^--misatv-full-update=(v\d+\.\d+\.\d+\.\d+)$')
+  final updateRestart = args.length == 1
+      ? RegExp(r'^--misatv-(full-update|update-failed)=(v\d+\.\d+\.\d+\.\d+)$')
             .firstMatch(args.single)
       : null;
-  runApp(KniephosApp(state: state, fullUpdateTag: fullUpdate?.group(1)));
+  runApp(
+    KniephosApp(
+      state: state,
+      fullUpdateTag: updateRestart?.group(1) == 'full-update'
+          ? updateRestart?.group(2)
+          : null,
+      failedUpdateTag: updateRestart?.group(1) == 'update-failed'
+          ? updateRestart?.group(2)
+          : null,
+    ),
+  );
   // 首帧之后才初始化托盘 / 老板键：此时窗口与消息循环都已就绪，
   // 原生托盘 API 才能安全调用（原因见上面 `bossKey` 处的注释）。
   if (bossKey != null) {

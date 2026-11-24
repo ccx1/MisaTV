@@ -83,7 +83,16 @@ class DeltaTest(unittest.TestCase):
             self.assertNotIn("files/runtimes/mpv-yaozhi/mpv.exe", zip_file.namelist())
         return path.rename(self.session / "delta.zip")
 
-    def start_worker(self, archive):
+    def create_full(self, variant="full"):
+        archive = self.session / "full.zip"
+        with ZipFile(archive, "w") as zip_file:
+            zip_file.write(self.exe, "MisaTV.exe")
+            for path, data in self.updated.items():
+                if variant == "full" or not path.startswith("runtimes/"):
+                    zip_file.writestr(path, data)
+        return archive
+
+    def start_worker(self, archive, variant="full"):
         parent = subprocess.Popen([self.exe, "wait"], cwd=self.root)
         self.addCleanup(parent.wait, 10)
         self.addCleanup(parent.terminate)
@@ -91,9 +100,11 @@ class DeltaTest(unittest.TestCase):
             POWERSHELL, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
             "-File", SCRIPT, "-Session", self.session, "-Root", self.root,
             "-ExeName", self.exe.name, "-ParentPid", str(parent.pid),
-            "-From", OLD, "-To", NEW, "-Variant", "full",
+            "-From", OLD, "-To", NEW, "-Variant", variant,
             "-Digest", hashlib.sha256(archive.read_bytes()).hexdigest(),
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            *(["-FullPackage"] if archive.name == "full.zip" else []),
+        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW)
         self.addCleanup(worker.wait, 10)
         self.addCleanup(worker.terminate)
         return parent, worker
@@ -143,6 +154,35 @@ class DeltaTest(unittest.TestCase):
         self.assertIsNone(parent.poll())
         self.assertEqual((self.root / "data/app.so").read_bytes(), b"custom app")
         self.assertEqual((self.root / "userdata/keep").read_bytes(), b"user data")
+
+    def test_full_package_overwrites_modified_base_and_restarts(self):
+        (self.root / "data/app.so").write_bytes(b"custom app")
+        parent, worker = self.start_worker(self.create_full())
+        self.assertEqual(wait_for(self.session / "ready", self.session / "failed").name, "ready")
+        self.assertEqual((self.root / "data/app.so").read_bytes(), b"custom app")
+        (self.session / "commit").touch()
+        parent.terminate()
+        worker.wait(20)
+        self.assertEqual(wait_for(self.root / "restart.txt").read_text(), "")
+        self.assert_contents(self.updated)
+
+    def test_full_package_rejects_other_variant_before_exiting(self):
+        parent, worker = self.start_worker(self.create_full("lite"))
+        self.assertIn("package layout or type", wait_for(self.session / "failed").read_text())
+        worker.wait(20)
+        self.assertIsNone(parent.poll())
+        self.assert_contents(self.original)
+
+    def test_full_package_rolls_back_and_reports_failure(self):
+        parent, worker = self.start_worker(self.create_full())
+        self.assertEqual(wait_for(self.session / "ready", self.session / "failed").name, "ready")
+        # 模拟准备完成后，目标路径被其他进程占用为目录。
+        (self.root / "data/new.txt").mkdir()
+        (self.session / "commit").touch()
+        parent.terminate()
+        worker.wait(20)
+        self.assertEqual(wait_for(self.root / "restart.txt").read_text(), f"--misatv-update-failed={NEW}")
+        self.assert_contents(self.original)
 
 
 if __name__ == "__main__":

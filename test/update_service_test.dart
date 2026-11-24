@@ -127,6 +127,28 @@ void main() {
     expect(UpdateService.pickAsset([asset(full)]), isNull);
   });
 
+  test('整包按包型记录，要求官方资产地址、大小和摘要', () {
+    const tag = 'v99.0.0.1';
+    const full = 'MisaTV-windows-x64.zip';
+    const lite = 'MisaTV-windows-x64-lite.zip';
+    const base = 'https://github.com/$kGithubRepo/releases/download/$tag';
+    final digest = 'sha256:${'b' * 64}';
+    final release = UpdateService.parseGithubRelease({
+      'tag_name': tag,
+      'assets': [
+        {...asset(full, url: '$base/$full'), 'digest': digest},
+        {...asset(lite, url: 'https://example.com/$lite'), 'digest': digest},
+        {...asset(lite, url: '$base/$lite'), 'digest': digest, 'size': 0},
+        asset(lite, url: '$base/$lite'),
+        {...asset(lite, url: '$base/$lite'), 'digest': digest},
+      ],
+    });
+    expect(release.windowsPackages['full']?.name, full);
+    expect(release.windowsPackages['lite']?.url, '$base/$lite');
+    expect(release.windowsPackages['lite']?.digest, digest);
+    expect(release.windowsDeltas, isEmpty);
+  });
+
   test('版本号归一：去掉 v 前缀与构建号', () {
     expect(UpdateService.normalizeVersion('v0.9.1'), '0.9.1');
     expect(UpdateService.normalizeVersion('  V1.2.3 '), '1.2.3');

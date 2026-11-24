@@ -8,10 +8,16 @@ import 'update_dialog.dart';
 
 /// 启动后检查一次更新；有新版本就弹窗（点「稍后提醒」下次启动会再弹）。
 class UpdateGate extends StatefulWidget {
-  const UpdateGate({super.key, required this.child, this.fullUpdateTag});
+  const UpdateGate({
+    super.key,
+    required this.child,
+    this.fullUpdateTag,
+    this.failedUpdateTag,
+  });
 
   final Widget child;
   final String? fullUpdateTag;
+  final String? failedUpdateTag;
 
   @override
   State<UpdateGate> createState() => _UpdateGateState();
@@ -47,6 +53,7 @@ class _UpdateGateState extends State<UpdateGate> {
       context,
       release,
       fallbackToFull: widget.fullUpdateTag == release.tag,
+      installFailed: widget.failedUpdateTag == release.tag,
     );
   }
 
