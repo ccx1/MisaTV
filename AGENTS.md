@@ -54,7 +54,7 @@ MisaTV 是 Flutter 编写的 TVBox 客户端，Windows x64 是主要交付平台
 维护要求：
 
 - 下载缓存可复用，支持中断后继续；存在上游校验值时验证完整性。初始化成功标记只能在文件准备完整后写入，恢复时保留 MPV 用户配置。
-- 随包 Python 要包含运行器、基类和声明的依赖库，并用嵌入式解释器实际导入验证；仅存在 `python.exe` 不代表完整就绪。保留 Python 资源版本与锁定依赖的标记规则。
+- 完整包的 Python 要包含运行器、基类和声明的依赖库，并用嵌入式解释器实际导入验证。标准包随包提供解释器，依赖库按需安装。保留 Python 资源版本与锁定依赖的标记规则。
 - 更新 JVM 兼容层时递增 `JvmRuntime._shimsRev`。修改 `ContextWrapper` / `Application` 桩后使用 JDK 17 执行 `tool/build_jvm_stubs.ps1`，同步提交对应源码及本项目构建的 `stubs.jar`，运行脚本内回归验证。
 - `assets/jvm/shell-real/*.jar` 是可选预解包载荷，不属于公开运行时依赖。缺失不能阻断安装或兼容层升级，也不能删除用户已有载荷；必需 shim 缺失则应报告失败。
 - 加固源自身首次解包、转换与 payload 缓存仍然需要执行；“运行时内置”不意味着所有第三方源无需首次处理。升级清理 JVM 旧版本时保留 `jvm/native/`。
@@ -109,16 +109,18 @@ flutter test --no-pub test/bundled_runtime_offline_test.dart
 
 ## 构建与交付
 
-Windows 完整包按以下顺序处理：依赖准备 → 静态分析与所需测试 → 准备四项运行时 → 真实组件离线检查 → Release 构建 → 检查发布文件 → 压缩与校验。
+Windows x64 发布同时提供轻量包、标准包和完整包。轻量包的扩展运行时按需安装，标准包随包范围与官方新增的 Windows 随包配置一致，完整包还包含 Python 依赖与 Yaozhi MPV 整合包。标准包的 JRE 由 JDK 17 的 `jlink` 裁剪，工作副本目录与完整包独立。
+
+先准备完整包和标准包运行时并执行离线检查，再构建 Release 并运行 `tool/package_windows.ps1` 生成和核验三档 ZIP。
 
 ```powershell
 flutter build windows --release
 ```
 
-- 产物目录为 `build/windows/x64/runner/Release/`。必须分发整个运行目录，包括 `data/`、插件 DLL、`runtimes/ready.json` 及四个组件，不能只交付 EXE。
+- 产物目录为 `build/windows/x64/runner/Release/`。三档都需包含 EXE、`data/` 和插件 DLL，标准包和完整包还需包含各自的 `runtimes/`。
 - EXE 同目录必须含 `msvcp140.dll`、`vcruntime140.dll`、`vcruntime140_1.dll`，使用项目构建流程提供的版本，不从 JRE 随便取旧 DLL。
 - **压缩包排除所有 `userdata/`**，并检查 ZIP 条目，防止订阅、历史、登录态和缓存泄漏。运行时必须从专用准备目录取得，不从用户数据目录整体复制。
-- 完整包的 CI 发布资产名称为 `MisaTV-windows-x64.zip`。本地版本化交付可放入 `build/packages/MisaTV-<version>-windows-x64-bundled.zip`。报告实际文件路径、大小、验证结果，交付压缩包时附 SHA-256。
+- CI 发布资产为 `MisaTV-windows-x64-lite.zip`、`MisaTV-windows-x64-standard.zip` 和 `MisaTV-windows-x64.zip`。本地 ZIP 可放入 `build/packages/`。报告实际文件路径、大小、验证结果，交付压缩包时附 SHA-256。
 - `assets/windows-runtimes/`、下载缓存、SDK、构建目录和发布压缩包不入库。`assets/aria2/aria2c.exe` 与私有壳载荷也不应强行加入 Git。仓库已跟踪的本项目自建 shim JAR 按其构建流程维护。
 - Fork 的应用与发布版本采用 `X.Y.Z.R`。前三段是所基于的官方版本，第四段从 `1` 开始，同一官方版本内逐次递增。基于官方 `1.2.0` 时依次用 `1.2.0.1`、`1.2.0.2`。跟进官方 `1.3.0` 后从 `1.3.0.1` 开始。
 - `lib/core/app_version.dart` 的 `kAppVersion` 记录完整四段版本，GitHub Release 和标签使用 `vX.Y.Z.R`。Flutter 的 `pubspec.yaml` 保持 `X.Y.Z+N` 格式，前三段与应用版本一致，平台构建编号 `N` 随每次新发布递增。

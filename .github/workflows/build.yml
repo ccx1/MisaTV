@@ -85,9 +85,16 @@ jobs:
       - name: 验证 Windows 差异更新、整包更新和回滚
         run: python -B tool/test_windows_delta.py -v
 
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: 准备内置 JVM / 加固壳 / Python / Yaozhi MPV
         shell: pwsh
-        run: ./tool/prepare_windows_runtimes.ps1 -PythonIndex https://pypi.org/simple/
+        run: |
+          ./tool/prepare_windows_runtimes.ps1 -PythonIndex https://pypi.org/simple/
+          ./tool/prepare_windows_runtimes.ps1 -Standard
 
       - name: 验证内置运行时离线可用
         run: flutter test --no-pub test/bundled_runtime_offline_test.dart
@@ -115,48 +122,9 @@ jobs:
       - name: 构建 Windows Release
         run: flutter build windows --release
 
-      - name: 打包（排除 userdata）
+      - name: 打包并核验 Windows 三档 ZIP
         shell: pwsh
-        run: |
-          $src = "build/windows/x64/runner/Release"
-          if (-not (Test-Path $src)) { throw "构建产物不存在：$src" }
-          $runtimeManifest = Get-Content -Raw "$src/runtimes/ready.json" | ConvertFrom-Json
-          $required = @(
-            'MisaTV.exe', 'apply_windows_delta.ps1', 'data/flutter_assets/AssetManifest.bin', 'runtimes/ready.json',
-            "runtimes/jvm/$($runtimeManifest.jvm)/bundle.json",
-            "runtimes/jvm/native/$($runtimeManifest.guard)/bundle.json",
-            "runtimes/python/$($runtimeManifest.python)/bundle.json",
-            'runtimes/mpv-yaozhi/bundle.json',
-            'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll'
-          )
-          $zip = "MisaTV-windows-x64.zip"
-          $files = Get-ChildItem -LiteralPath $src | Where-Object Name -ne 'userdata'
-          Compress-Archive -LiteralPath $files.FullName -DestinationPath $zip -CompressionLevel Optimal -Force
-          Add-Type -AssemblyName System.IO.Compression.FileSystem
-          $archive = [System.IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip).Path)
-          try {
-            $entries = $archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') }
-            if ($entries -match '(^|/)userdata(/|$)') { throw '发布包含有 userdata' }
-            foreach ($file in $required) {
-              if ($file -notin $entries) { throw "发布包缺少文件：$file" }
-            }
-            Write-Host "文件数=$($entries.Count) 体积=$((Get-Item $zip).Length) 字节"
-          } finally {
-            $archive.Dispose()
-          }
-          $lite = 'MisaTV-windows-x64-lite.zip'
-          $liteFiles = $files | Where-Object Name -ne 'runtimes'
-          Compress-Archive -LiteralPath $liteFiles.FullName -DestinationPath $lite -CompressionLevel Optimal -Force
-          $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $lite).Path)
-          try {
-            $entries = $archive.Entries | ForEach-Object { $_.FullName.Replace('\', '/') }
-            if ($entries -match '(^|/)userdata(/|$)|^runtimes(/|$)') { throw '轻量包含有 userdata 或 runtimes' }
-            foreach ($file in $required | Where-Object { $_ -notlike 'runtimes/*' }) {
-              if ($file -notin $entries) { throw "轻量包缺少文件：$file" }
-            }
-          } finally {
-            $archive.Dispose()
-          }
+        run: ./tool/package_windows.ps1
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
@@ -165,6 +133,7 @@ jobs:
           path: |
             MisaTV-windows-x64.zip
             MisaTV-windows-x64-lite.zip
+            MisaTV-windows-x64-standard.zip
           if-no-files-found: error
           retention-days: 14
 

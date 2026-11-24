@@ -88,7 +88,7 @@ class DeltaTest(unittest.TestCase):
         with ZipFile(archive, "w") as zip_file:
             zip_file.write(self.exe, "MisaTV.exe")
             for path, data in self.updated.items():
-                if variant == "full" or not path.startswith("runtimes/"):
+                if variant != "lite" or not path.startswith("runtimes/"):
                     zip_file.writestr(path, data)
         return archive
 
@@ -168,6 +168,27 @@ class DeltaTest(unittest.TestCase):
 
     def test_full_package_rejects_other_variant_before_exiting(self):
         parent, worker = self.start_worker(self.create_full("lite"))
+        self.assertIn("package layout or type", wait_for(self.session / "failed").read_text())
+        worker.wait(20)
+        self.assertIsNone(parent.poll())
+        self.assert_contents(self.original)
+
+    def test_standard_delta_keeps_package_variant(self):
+        marker = "runtimes/standard"
+        self.original[marker] = b""
+        self.updated[marker] = b""
+        (self.root / marker).touch()
+        parent, worker = self.start_worker(self.create_delta(), "standard")
+        self.assertEqual(wait_for(self.session / "ready", self.session / "failed").name, "ready")
+        (self.session / "commit").touch()
+        parent.terminate()
+        worker.wait(20)
+        self.assertEqual(wait_for(self.root / "restart.txt").read_text(), "")
+        self.assert_contents(self.updated)
+
+    def test_standard_install_rejects_full_package(self):
+        (self.root / "runtimes/standard").touch()
+        parent, worker = self.start_worker(self.create_full(), "standard")
         self.assertIn("package layout or type", wait_for(self.session / "failed").read_text())
         worker.wait(20)
         self.assertIsNone(parent.poll())

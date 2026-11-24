@@ -11,7 +11,7 @@ from zipfile import ZIP_DEFLATED, ZipFile
 
 VERSION = re.compile(r"v(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.[1-9][0-9]*")
 RESERVED = re.compile(r"^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])(?:\.|$)", re.I)
-ANCHORS = ("misatv.exe", "data/app.so", "runtimes/ready.json")
+ANCHORS = ("misatv.exe", "data/app.so", "runtimes/ready.json", "runtimes/standard")
 
 
 @dataclass
@@ -56,10 +56,9 @@ def build(previous: Path, current: Path, output_dir: Path, old: str, new: str) -
         raise ValueError("Expected ascending four-part MisaTV release tags")
     with ZipFile(previous) as base, ZipFile(current) as target:
         before, after = index(base), index(target)
-        has_runtimes = "runtimes/ready.json" in after
-        if has_runtimes != ("runtimes/ready.json" in before):
+        variant = package_variant(after)
+        if variant != package_variant(before):
             raise ValueError("Base and target must have the same Windows package type")
-        variant = "full" if has_runtimes else "lite"
         output = output_dir / f"MisaTV-delta-x64-{variant}-{old}-to-{new}.zip"
         files = []
         payload = {}
@@ -84,6 +83,14 @@ def build(previous: Path, current: Path, output_dir: Path, old: str, new: str) -
                 with target.open(entry.name) as source, delta.open(f"files/{path}", "w") as dest:
                     shutil.copyfileobj(source, dest, 1024 * 1024)
         return output
+
+
+def package_variant(files: dict[str, Entry]) -> str:
+    if "runtimes/standard" in files:
+        if "runtimes/ready.json" not in files:
+            raise ValueError("Missing standard runtime manifest")
+        return "standard"
+    return "full" if "runtimes/ready.json" in files else "lite"
 
 
 def main() -> None:

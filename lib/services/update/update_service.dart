@@ -248,12 +248,12 @@ class UpdateService {
         return null;
       }
 
-      for (final variant in ['full', 'lite']) {
+      for (final variant in ['full', 'lite', 'standard']) {
         final delta = trustedAsset(
           'MisaTV-delta-x64-$variant-v$kAppVersion-to-$tag.zip',
         );
         if (delta != null) deltas[variant] = delta;
-        final suffix = variant == 'lite' ? '-lite' : '';
+        final suffix = variant == 'full' ? '' : '-$variant';
         final package = trustedAsset('MisaTV-windows-x64$suffix.zip');
         if (package != null) packages[variant] = package;
       }

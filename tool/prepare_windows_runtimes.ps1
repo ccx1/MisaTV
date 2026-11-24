@@ -2,15 +2,24 @@ param(
     [string]$Python = 'python',
     [string]$PythonIndex = 'https://mirrors.aliyun.com/pypi/simple/',
     [string]$CacheDirectory = '',
-    [string]$OutputDirectory = ''
+    [string]$OutputDirectory = '',
+    [switch]$Standard
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path -Parent $PSScriptRoot
 if (-not $CacheDirectory) { $CacheDirectory = Join-Path $repo 'build/runtime-downloads' }
-if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repo 'assets/windows-runtimes' }
+if (-not $OutputDirectory) {
+    $OutputDirectory = Join-Path $repo $(if ($Standard) { 'build/windows-runtimes-standard/runtimes' } else { 'assets/windows-runtimes' })
+}
 $cache = [IO.Path]::GetFullPath($CacheDirectory)
 $output = [IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Force -Path $cache, $output | Out-Null
+$standardMarker = Join-Path $output 'standard'
+if (($Standard -and (Test-Path -LiteralPath (Join-Path $output 'mpv-yaozhi'))) -or
+    (!$Standard -and (Test-Path -LiteralPath $standardMarker))) {
+    throw 'Use separate output directories for the standard and full runtimes'
+}
+if ($Standard) { New-Item -ItemType File -Force -Path $standardMarker | Out-Null }
 if (Test-Path -LiteralPath (Join-Path $output 'ready.json')) {
     Remove-Item -LiteralPath (Join-Path $output 'ready.json')
 }
@@ -85,9 +94,20 @@ $jvm = Join-Path $output "jvm/$jvmVersion"
 $arm = Join-Path $output "jvm/native/$armVersion"
 $py = Join-Path $output "python/$pyVersion"
 $mpv = Join-Path $output 'mpv-yaozhi'
-New-Item -ItemType Directory -Force -Path $jvm, $arm, $py, $mpv | Out-Null
+New-Item -ItemType Directory -Force -Path $jvm, $arm, $py | Out-Null
 
-if (-not (Test-Path -LiteralPath (Join-Path $jvm 'jre/bin/java.exe'))) {
+if ($Standard -and -not (Test-Path -LiteralPath (Join-Path $jvm 'jre/bin/java.exe'))) {
+    if (!$env:JAVA_HOME) { throw 'JAVA_HOME must point to a Windows x64 JDK 17' }
+    $jlink = Join-Path $env:JAVA_HOME 'bin/jlink.exe'
+    # 官方 MisaTV 558bc60 的模块清单（GPL-3.0）。
+    $modules = 'java.base,java.desktop,java.logging,java.management,java.naming,java.net.http,java.sql,java.xml,jdk.crypto.ec,jdk.charsets,jdk.httpserver,jdk.unsupported,jdk.zipfs'
+    $javaVersion = & $jlink --version
+    if ($LASTEXITCODE -ne 0 -or $javaVersion -notmatch '^17\.') { throw 'jlink must come from JDK 17' }
+    $stage = Join-Path (Split-Path -Parent $output) ('jlink-' + [guid]::NewGuid().ToString('N'))
+    & $jlink --no-header-files --no-man-pages --compress=2 --strip-debug --add-modules $modules --output $stage
+    if ($LASTEXITCODE -ne 0) { throw 'jlink failed' }
+    Move-Item -LiteralPath $stage -Destination (Join-Path $jvm 'jre')
+} elseif (-not (Test-Path -LiteralPath (Join-Path $jvm 'jre/bin/java.exe'))) {
     $releases = Invoke-RestMethod 'https://api.adoptium.net/v3/assets/latest/17/hotspot?architecture=x64&image_type=jre&os=windows' -TimeoutSec 60
     $package = @($releases)[0].binary.package
     $zip = Get-Download -Urls @("https://gh-proxy.com/$($package.link)", $package.link, "https://ghfast.top/$($package.link)") -Name $package.name -Sha256 $package.checksum
@@ -113,13 +133,24 @@ New-Item -ItemType Directory -Force -Path $shims | Out-Null
 Get-ChildItem -LiteralPath (Join-Path $repo 'assets/jvm') -File -Filter '*.jar' | Copy-Item -Destination $shims -Force
 # Only public engine dependencies are bundled; never copy shell payloads or userdata.
 $jvmRequired = @(Get-ChildItem -LiteralPath $dex, (Join-Path $jvm 'libs'), $shims -File | ForEach-Object { $_.FullName.Substring($jvm.Length + 1).Replace('\', '/') })
-Write-Bundle "jvm/$jvmVersion" (@('jre/bin/java.exe', 'jre/bin/server/jvm.dll', 'jre/lib/modules') + $jvmRequired)
+$javaRequired = @('jre/bin/java.exe', 'jre/bin/server/jvm.dll', 'jre/lib/modules')
+if ($Standard) { $javaRequired += 'jre/legal/java.base/LICENSE' }
+Write-Bundle "jvm/$jvmVersion" ($javaRequired + $jvmRequired)
 Write-Bundle "jvm/native/$armVersion" @(Get-ChildItem -LiteralPath $arm -File -Filter '*.jar' | ForEach-Object Name)
 
 if (-not (Test-Path -LiteralPath (Join-Path $py 'python.exe'))) {
     $zip = Get-Download -Urls @("https://mirrors.huaweicloud.com/python/$pyVersion/python-$pyVersion-embed-amd64.zip", "https://www.python.org/ftp/python/$pyVersion/python-$pyVersion-embed-amd64.zip") -Name "python-$pyVersion-embed-amd64.zip"
     [IO.Compression.ZipFile]::ExtractToDirectory($zip, $py)
 }
+$ready = @{jvm = $jvmVersion; guard = $armVersion; python = $pyVersion}
+Copy-Item -LiteralPath (Join-Path $repo 'THIRD-PARTY-NOTICES.md') -Destination $output -Force
+if ($Standard) {
+    Write-Bundle "python/$pyVersion" @('python.exe', 'python311.dll', 'python311.zip')
+    $ready | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'ready.json') -Encoding utf8
+    Write-Host "Standard runtimes ready: $output"
+    return
+}
+
 $pySource = Get-Content -LiteralPath (Join-Path $repo 'lib/services/py_spider/py_runtime.dart') -Raw
 $specs = [regex]::Matches($pySource, "_WheelSpec\(\s*'([^']+)'\s*,\s*'([^']+)'\s*,\s*\[[^\]]*\]\s*,\s*(?:true|false)(?:\s*,\s*'([^']+)')?", 'Singleline')
 $requirements = @($specs | ForEach-Object { $name = $_.Groups[1].Value; if ($_.Groups[3].Success) { $name += '==' + $_.Groups[3].Value }; $name })
@@ -152,6 +183,7 @@ if ($LASTEXITCODE -ne 0) { throw 'Embedded Python dependency check failed' }
 Write-Bundle "python/$pyVersion" @('python.exe', 'python311.dll', 'python311.zip', 'runner.py', 'base/spider.py', 'Lib/site-packages/requests/__init__.py')
 
 if (-not (Test-Path -LiteralPath (Join-Path $mpv 'meta.json'))) {
+    New-Item -ItemType Directory -Force -Path $mpv | Out-Null
     $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/Yaozhil/mpv-Yaozhi/releases/latest' -TimeoutSec 60
     $asset = $release.assets | Where-Object { $_.name -match '\.(7z|zip)$' } | Sort-Object size -Descending | Select-Object -First 1
     if (-not $asset) { throw 'No Yaozhi MPV archive in latest release' }
@@ -168,7 +200,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $mpv 'meta.json'))) {
 $mpvExe = Get-ChildItem -LiteralPath $mpv -File -Filter Yaoplayer.exe -Recurse | Where-Object { $_.FullName -notmatch '[\\/]portable_config[\\/]experimental[\\/]' } | Select-Object -First 1
 if (-not $mpvExe) { throw 'No Yaoplayer.exe in bundled MPV' }
 Write-Bundle 'mpv-yaozhi' @($mpvExe.FullName.Substring($mpv.Length + 1).Replace('\', '/'), 'meta.json')
-Copy-Item -LiteralPath (Join-Path $repo 'THIRD-PARTY-NOTICES.md') -Destination $output -Force
-@{jvm = $jvmVersion; guard = $armVersion; python = $pyVersion; mpv = (Get-Content -LiteralPath (Join-Path $mpv 'meta.json') -Raw | ConvertFrom-Json).tag} |
+$ready.mpv = (Get-Content -LiteralPath (Join-Path $mpv 'meta.json') -Raw | ConvertFrom-Json).tag
+$ready |
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $output 'ready.json') -Encoding utf8
 Write-Host "All four runtimes ready: $output"

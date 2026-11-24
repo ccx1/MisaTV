@@ -131,7 +131,7 @@ class JvmRuntime {
     final cached = _cachedDir;
     if (cached != null) return cached;
     final support = await getApplicationSupportDirectory();
-    final dir = Directory(p.join(support.path, 'jvm', version));
+    final dir = BundledRuntime.jvmDirectory(support.path, version);
     await BundledRuntime.restore('jvm/$version', dir);
     _cachedDir = dir;
     return dir;

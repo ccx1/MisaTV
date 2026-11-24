@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory = $true)][int]$ParentPid,
     [Parameter(Mandatory = $true)][string]$From,
     [Parameter(Mandatory = $true)][string]$To,
-    [Parameter(Mandatory = $true)][ValidateSet('full', 'lite')][string]$Variant,
+    [Parameter(Mandatory = $true)][ValidateSet('full', 'lite', 'standard')][string]$Variant,
     [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{64}$')][string]$Digest,
     [switch]$FullPackage
 )
@@ -65,7 +65,8 @@ function Stage-FullPackage($Zip) {
         $changed.Add(@{ path = $path; payload = $payload; backup = Join-Path $stage "old-$index" })
     }
     if (!$paths.Contains('MisaTV.exe') -or !$paths.Contains('data/app.so') -or
-        $paths.Contains('runtimes/ready.json') -ne ($Variant -eq 'full')) {
+        $paths.Contains('runtimes/ready.json') -ne ($Variant -ne 'lite') -or
+        $paths.Contains('runtimes/standard') -ne ($Variant -eq 'standard')) {
         throw 'Invalid Windows package layout or type'
     }
 }
@@ -85,8 +86,10 @@ try {
     $stage = Join-Path $Root ('.misatv-update-' + [guid]::NewGuid().ToString('N'))
     $lock = [IO.FileStream]::new((Join-Path $Root '.misatv-update.lock'), 'OpenOrCreate', 'ReadWrite', 'None', 4096, 'DeleteOnClose')
     [IO.Directory]::CreateDirectory($stage) | Out-Null
-    $expectedRuntime = $Variant -eq 'full'
-    if ((Test-Path -LiteralPath (Get-SafeTarget 'runtimes/ready.json') -PathType Leaf) -ne $expectedRuntime) {
+    $expectedRuntime = $Variant -ne 'lite'
+    $expectedStandard = $Variant -eq 'standard'
+    if ((Test-Path -LiteralPath (Get-SafeTarget 'runtimes/ready.json') -PathType Leaf) -ne $expectedRuntime -or
+        (Test-Path -LiteralPath (Get-SafeTarget 'runtimes/standard') -PathType Leaf) -ne $expectedStandard) {
         throw 'Installed package type does not match'
     }
     if ((Get-Sha256 $zipPath) -ine $Digest) {
@@ -126,7 +129,8 @@ try {
                 $changed.Add(@{ path = $entry.path; entry = $entry; payload = $payload; backup = Join-Path $stage "old-$index" })
             }
             if (!$paths.Contains('MisaTV.exe') -or !$paths.Contains('data/app.so') -or
-                ($expectedRuntime -and !$paths.Contains('runtimes/ready.json'))) { throw 'Missing base checks' }
+                ($expectedRuntime -and !$paths.Contains('runtimes/ready.json')) -or
+                ($expectedStandard -and !$paths.Contains('runtimes/standard'))) { throw 'Missing base checks' }
         }
     } finally { $zip.Dispose() }
 

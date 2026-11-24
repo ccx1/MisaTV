@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -41,24 +40,7 @@ void main() {
       try {
         await HttpOverrides.runZoned(() async {
           final source = Directory('assets/windows-runtimes').absolute;
-          final ready = jsonDecode(
-            File('${source.path}/ready.json').readAsStringSync(),
-          ) as Map;
-          for (final relative in [
-            'jvm/${ready['jvm']}',
-            'jvm/native/${ready['guard']}',
-            'python/${ready['python']}',
-            'mpv-yaozhi',
-          ]) {
-            expect(
-              await BundledRuntime.restore(
-                relative,
-                Directory('${temp.path}/$relative'),
-                bundleRoot: source,
-              ),
-              isTrue,
-            );
-          }
+          await BundledRuntime.initialize(temp.path, bundleRoot: source);
           expect(await JvmRuntime.instance.installed(refresh: true), isTrue);
           await JvmRuntime.instance.ensureInstalled();
           final java = await Process.run(
@@ -89,5 +71,56 @@ void main() {
         !Platform.isWindows ||
         !File('assets/windows-runtimes/ready.json').existsSync(),
     timeout: const Timeout(Duration(minutes: 3)),
+  );
+  final standard = Directory('build/windows-runtimes-standard/runtimes');
+  test(
+    '标准包从空目录离线初始化随包组件',
+    () async {
+      final support = await Directory.systemTemp.createTemp('misatv-standard-');
+      addTearDown(() => support.delete(recursive: true));
+      final standardJvm = BundledRuntime.jvmDirectory(
+        support.path,
+        JvmRuntime.version,
+        bundleRoot: standard,
+      );
+      await HttpOverrides.runZoned(() async {
+        await BundledRuntime.initialize(support.path, bundleRoot: standard);
+      }, createHttpClient: (_) => _OfflineClient());
+      final java = await Process.run('${standardJvm.path}/jre/bin/java.exe', [
+        '--list-modules',
+      ]);
+      expect(java.exitCode, 0);
+      for (final module in [
+        'java.management',
+        'jdk.crypto.ec',
+        'jdk.charsets',
+        'jdk.zipfs',
+      ]) {
+        expect(java.stdout, contains('$module@17.'));
+      }
+      expect(
+        File('${standardJvm.path}/d2j/dex-tools-v2.4.jar').existsSync(),
+        isTrue,
+      );
+      expect(
+        File(
+          '${support.path}/jvm/native/${ArmBridgeRuntime.version}/unidbg-android-0.9.9.jar',
+        ).existsSync(),
+        isTrue,
+      );
+      final pythonPath = '${support.path}/python/${PyRuntime.version}';
+      final python = await Process.run('$pythonPath/python.exe', ['--version']);
+      expect(python.exitCode, 0);
+      expect(python.stdout, contains('Python ${PyRuntime.version}'));
+      expect(Directory('$pythonPath/Lib/site-packages').existsSync(), isFalse);
+      expect(Directory('${support.path}/mpv-yaozhi').existsSync(), isFalse);
+      expect(
+        Directory('${support.path}/jvm/${JvmRuntime.version}').existsSync(),
+        isFalse,
+      );
+    },
+    skip:
+        !Platform.isWindows ||
+        !File('${standard.path}/ready.json').existsSync(),
   );
 }
