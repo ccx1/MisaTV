@@ -206,7 +206,10 @@ class AppState extends ChangeNotifier {
   late final XunleiCloudService xunleiCloudService = XunleiCloudService(
     store: store,
     logger: (message) => AppLog.i('xunlei', message),
-    onChanged: notifyListeners,
+    onChanged: () {
+      _syncDriveTokens();
+      notifyListeners();
+    },
   );
 
   XunleiAccount get xunleiAccount => xunleiCloudService.account;
@@ -3749,6 +3752,18 @@ class AppState extends ChangeNotifier {
             .where((e) => !_isGuestCredential(e.key, e.value.extra['guest']))
             .map((e) => MapEntry(e.key, e.value.cookie.trim())),
       );
+    if (xunleiCloudService.account.loggedIn) {
+      final xl = xunleiCloudService.account;
+      driveTokens['thunder'] = jsonEncode({
+        'accessToken': xl.accessToken.trim(),
+        'refreshToken': xl.refreshToken.trim(),
+        'tokenType': xl.tokenType.trim().isEmpty ? 'Bearer' : xl.tokenType.trim(),
+        'userId': xl.userId.trim(),
+        'deviceId': xl.deviceId.trim(),
+        'expireTime': xl.expiresAt,
+        'peerId': xl.peerId.trim(),
+        });
+    }
     // 只记 provider 名，绝不把 Cookie 写进日志；下一份日志可直接判断
     // 「没登录」到底是凭据层没注入，还是壳层没读到。
     AppLog.i('drive', '凭据已注入蜘蛛 provider=${driveTokens.keys.toList()}');
@@ -3789,6 +3804,8 @@ class AppState extends ChangeNotifier {
       if (token.isNotEmpty) seed['Wex_ucpan_token'] = token;
       if (device.isNotEmpty) seed['Wex_ucpan_device_id'] = device;
     }
+    final baiduUid = (driveAccounts['baidu']?.extra['baiduUid'] ?? '').trim();
+    if (baiduUid.isNotEmpty) seed['baidu_user_id'] = baiduUid;
     return seed;
   }
 
@@ -3853,7 +3870,13 @@ class AppState extends ChangeNotifier {
       if (result.valid != true) return;
       // 确认登录成功：合并新 Cookie、清掉访客标记。
       final extra = {...account.extra}..remove('guest');
-      if (result.changed || wasGuest) {
+      final uidChanged = provider == 'baidu' &&
+          result.userId.isNotEmpty &&
+          account.extra['baiduUid'] != result.userId;
+      if (provider == 'baidu' && result.userId.isNotEmpty) {
+        extra['baiduUid'] = result.userId;
+      }
+      if (result.changed || wasGuest || uidChanged) {
         final next = account.copyWith(
           cookie: result.changed ? result.cookie : account.cookie,
           extra: extra,
@@ -3912,6 +3935,9 @@ class AppState extends ChangeNotifier {
     if (_refreshableProviders.contains(provider)) {
       unawaited(_refreshDriveSession(provider));
     }
+    if (provider == 'thunder' && cookie.trim().isNotEmpty && xunleiCloudService.account.refreshToken.trim() != cookie.trim()) {
+      unawaited(xunleiCloudService.loginWithRefreshToken(cookie.trim()).catchError((_) => xunleiCloudService.account));
+    }
   }
 
   Future<void> removeDriveAccount(String provider) async {
@@ -3921,6 +3947,9 @@ class AppState extends ChangeNotifier {
     await store.saveDriveAccounts(driveAccounts);
     notifyListeners();
     AppLog.i('drive', '移除网盘账号 provider=$provider');
+    if (provider == 'thunder' && xunleiCloudService.account.loggedIn) {
+      unawaited(xunleiCloudService.logout().catchError((_) {}));
+    }
   }
 
   /// 新增 / 编辑 WebDAV 服务器（保存后刷新设置页与列表）。
@@ -3997,39 +4026,47 @@ class AppState extends ChangeNotifier {
     required String serverId,
     String? remotePath,
   }) async {
-    if (davService.byId(serverId) == null) {
+    final server = davService.byId(serverId);
+    if (server == null) {
       throw AppException('请选择 WebDAV 服务器');
     }
     final path = SyncSettings.normalizeRemotePath(
       remotePath ?? syncSettings.remotePath,
     );
-    var report = const SyncMergeReport();
-    final remoteText = await davService.getText(serverId, path);
-    if (remoteText != null && remoteText.trim().isNotEmpty) {
-      Map<String, dynamic>? decoded;
-      try {
-        final raw = jsonDecode(remoteText);
-        if (raw is Map) decoded = Map<String, dynamic>.from(raw);
-      } catch (_) {
-        decoded = null;
+    // 记下实际请求的服务器与路径，用户反馈「同步失败」时日志能直接定位。
+    AppLog.i('sync', 'WebDAV 同步开始：${server.url} → $path');
+    try {
+      var report = const SyncMergeReport();
+      final remoteText = await davService.getText(serverId, path);
+      if (remoteText != null && remoteText.trim().isNotEmpty) {
+        Map<String, dynamic>? decoded;
+        try {
+          final raw = jsonDecode(remoteText);
+          if (raw is Map) decoded = Map<String, dynamic>.from(raw);
+        } catch (_) {
+          decoded = null;
+        }
+        if (decoded == null) {
+          throw AppException('远端同步文件不是合法 JSON（$path）');
+        }
+        report = await applySyncBundle(SyncBundle.fromJson(decoded));
       }
-      if (decoded == null) {
-        throw AppException('远端同步文件不是合法 JSON（$path）');
-      }
-      report = await applySyncBundle(SyncBundle.fromJson(decoded));
+      final merged = buildSyncBundle();
+      await davService.putText(serverId, path, jsonEncode(merged.toJson()));
+      final now = DateTime.now().millisecondsSinceEpoch;
+      syncSettings = syncSettings.copyWith(
+        davServerId: serverId,
+        remotePath: path,
+        lastSyncAt: now,
+      );
+      await store.saveSyncSettings(syncSettings);
+      notifyListeners();
+      AppLog.i('sync', 'WebDAV 同步完成：$path');
+      return report.copyWith(pushed: true);
+    } catch (e) {
+      AppLog.w('sync', 'WebDAV 同步失败（${server.url} → $path）：$e');
+      rethrow;
     }
-    final merged = buildSyncBundle();
-    await davService.putText(serverId, path, jsonEncode(merged.toJson()));
-    final now = DateTime.now().millisecondsSinceEpoch;
-    syncSettings = syncSettings.copyWith(
-      davServerId: serverId,
-      remotePath: path,
-      lastSyncAt: now,
-    );
-    await store.saveSyncSettings(syncSettings);
-    notifyListeners();
-    AppLog.i('sync', 'WebDAV 同步完成：$path');
-    return report.copyWith(pushed: true);
   }
 
   /// 局域网双向同步：拉取对端 → 合并 → 把合并结果推回对端。

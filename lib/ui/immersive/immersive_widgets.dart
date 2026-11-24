@@ -1206,16 +1206,24 @@ class _ImmersiveHeroState extends State<ImmersiveHero> {
                                 countries: item.countries,
                                 fallback: item.subtitle,
                               );
-                              final heroTextMaxWidth = m.compact
+                              final heroTextMaxWidth = m.compact || m.short
                                   ? MediaQuery.sizeOf(context).width -
                                       m.heroInset * 2
                                   : double.infinity;
+                              // 横屏手机：竖排标题与右侧信息并排，标题不能占满整行。
+                              final verticalTitleWidth = m.short
+                                  ? heroTextMaxWidth * 0.58
+                                  : heroTextMaxWidth;
                               final info = _HeroInfoColumn(
                                 item: item,
                                 compact: plan.vertical,
                                 descriptionWidth: plan.vertical
-                                    ? (m.compact ? heroTextMaxWidth : 560)
-                                    : (m.compact ? heroTextMaxWidth : 760),
+                                    ? (m.short
+                                          ? heroTextMaxWidth * 0.36
+                                          : (m.compact ? heroTextMaxWidth : 560))
+                                    : (m.compact || m.short
+                                          ? heroTextMaxWidth
+                                          : 760),
                               );
                               return Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -1228,11 +1236,13 @@ class _ImmersiveHeroState extends State<ImmersiveHero> {
                                       children: [
                                         DesignedTitle(
                                           plan: plan,
-                                          maxWidth: heroTextMaxWidth,
-                                          maxHeight: widget.height - 220,
+                                          maxWidth: verticalTitleWidth,
+                                          maxHeight: (widget.height - 220)
+                                              .clamp(80.0, double.infinity)
+                                              .toDouble(),
                                           overline: tagline,
                                         ),
-                                        const SizedBox(width: 26),
+                                        SizedBox(width: m.short ? 16 : 26),
                                         Flexible(child: info),
                                       ],
                                     )
@@ -1240,7 +1250,9 @@ class _ImmersiveHeroState extends State<ImmersiveHero> {
                                     DesignedTitle(
                                       plan: plan,
                                       maxWidth: heroTextMaxWidth,
-                                      maxHeight: widget.height - 220,
+                                      maxHeight: (widget.height - 220)
+                                          .clamp(80.0, double.infinity)
+                                          .toDouble(),
                                       overline: tagline,
                                     ),
                                     info,
@@ -1258,8 +1270,8 @@ class _ImmersiveHeroState extends State<ImmersiveHero> {
             ),
             if (items.length > 1)
               Positioned(
-                right: m.compact ? 14 : 56,
-                bottom: m.compact ? 12 : 58,
+                right: m.compact || m.short ? 16 : 56,
+                bottom: m.compact || m.short ? 16 : 58,
                 child: Row(
                   children: [
                     for (var i = 0; i < items.length; i++)

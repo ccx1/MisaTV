@@ -34,6 +34,8 @@ class LocalRelay {
   LocalRelay._();
   static final LocalRelay instance = LocalRelay._();
 
+  static const _playTotalSizesMax = 256;
+  final Map<String, int> _playTotalSizes = {};
   static const int preferredPort = 9978;
 
   /// BT 取流分片大小：每片写回播放器前做一次 piece 门控。
@@ -49,6 +51,9 @@ class LocalRelay {
   int _port = 0;
   String _fileRoot = '';
   Map<String, String> Function() _driveTokens = () => const {};
+
+  /// TVBus Go 引擎的 `/tvbus` 配置内容（直播源的 `core.resp`）。
+  String Function()? tvbusConfig;
   List<dynamic> Function() _rules = () => const [];
   bool Function() _purifyEnabled = () => false;
   String Function(String id) _davAuth = (_) => '';
@@ -403,7 +408,8 @@ class LocalRelay {
       // 封面 / 海报会在浏览时反复回源，连接池多留一会儿：
       // 默认 15 秒空闲就断开，翻两页再回来又要重做一次 TLS 握手。
       ..idleTimeout = const Duration(seconds: 60)
-      ..autoUncompress = false;
+      ..autoUncompress = false
+      ..findProxy = _findProxyDirectLoopback;
 
     HttpServer server;
     try {
@@ -641,6 +647,23 @@ class LocalRelay {
       if (path.startsWith('/proxy/')) {
         return await _handleJvmProxyPath(request);
       }
+      // TVBus（Go 引擎）在 core.resp 非空时会来取这份配置；内容由
+      // TvBusService 在启动引擎前设置。没有配置时返回空串（HTTP 200）。
+      if (path == '/tvbus') {
+        final body = tvbusConfig?.call() ?? '';
+        final json =
+            body.trimLeft().startsWith('{') || body.trimLeft().startsWith('[');
+        res.statusCode = 200;
+        res.headers.set(
+          'content-type',
+          json
+              ? 'application/json; charset=utf-8'
+              : 'text/plain; charset=utf-8',
+        );
+        res.add(utf8.encode(body));
+        await res.close();
+        return;
+      }
       if (path == '/') return await _text(res, 200, 'MisaTV local relay');
       return await _text(res, 404, 'not found');
     } catch (e, s) {
@@ -726,6 +749,10 @@ class LocalRelay {
             'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
       }
     }
+    final m1905Link = targetHost == 'm1905.com' || targetHost.endsWith('.m1905.com');
+    if (m1905Link && _headerValue(headers, HttpHeaders.refererHeader).isEmpty) {
+      headers[HttpHeaders.refererHeader] = 'https://www.1905.com/';
+    }
     final davId = (query['dav'] ?? '').trim();
     if (davId.isNotEmpty &&
         !headers.keys.any((k) => k.toLowerCase() == 'authorization')) {
@@ -769,8 +796,12 @@ class LocalRelay {
     //
     //   所以网盘线路上没有 Range 时，主动合成首段 `bytes=0-<span-1>`，
     //   让上游回 206 + Content-Range —— 有总长、能 seek、速度也回到正常档。
+    final knownTotal = _playTotalSizes[target];
+    final firstSpan = knownTotal != null && knownTotal < _firstUpstreamRangeBytes
+        ? knownTotal
+        : _firstUpstreamRangeBytes;
     var clamped = _shouldClampRange(provider, target)
-        ? clampRange(range) ?? 'bytes=0-${_firstUpstreamRangeBytes - 1}'
+        ? clampRange(range, totalLength: knownTotal) ?? 'bytes=0-${firstSpan - 1}'
         : range;
     final manifest =
         target.toLowerCase().contains('.m3u8') ||
@@ -1054,6 +1085,11 @@ class LocalRelay {
     if (slash < 0) return;
     final total = int.tryParse(contentRange.substring(slash + 1).trim()) ?? 0;
     if (total <= 0) return;
+    if (_playTotalSizes.length >= _playTotalSizesMax &&
+        !_playTotalSizes.containsKey(target)) {
+      _playTotalSizes.remove(_playTotalSizes.keys.first);
+    }
+    _playTotalSizes[target] = total;
     final m = RegExp(
       r'bytes\s*=\s*(\d+)\s*-',
       caseSensitive: false,
@@ -1120,7 +1156,7 @@ class LocalRelay {
   ///
   /// `start == 0`（首段，含 `bytes=0-` 与 `bytes=0-<大数>`）用更小的跨度，
   /// 让播放器尽早拿到第一批数据去做尾部 seek；其余用 [_maxUpstreamRangeBytes]。
-  static String? clampRange(String? range) {
+  static String? clampRange(String? range, {int? totalLength}) {
     if (range == null || range.trim().isEmpty) return range;
     final m = RegExp(
       r'^bytes\s*=\s*(\d+)\s*-\s*(\d*)$',
@@ -1130,15 +1166,21 @@ class LocalRelay {
     final start = int.tryParse(m.group(1)!);
     if (start == null || start < 0) return range;
     final span = start == 0 ? _firstUpstreamRangeBytes : _maxUpstreamRangeBytes;
+    var maxEnd = start + span - 1;
+    // 已知道总长时不要把请求伸到文件外：部分 CDN 对越界 Range 直接回 416。
+    if (totalLength != null && totalLength > 0 && maxEnd >= totalLength) {
+      maxEnd = totalLength - 1;
+    }
+    if (maxEnd < start) return range;
     final endText = m.group(2)!.trim();
     if (endText.isEmpty) {
       // 开放区间：夹成固定跨度（首段更小）
-      return 'bytes=$start-${start + span - 1}';
+      return 'bytes=$start-$maxEnd';
     }
     final end = int.tryParse(endText);
     if (end == null || end < start) return range;
-    if (end - start + 1 <= span) return range;
-    return 'bytes=$start-${start + span - 1}';
+    if (end <= maxEnd) return range;
+    return 'bytes=$start-$maxEnd';
   }
 
   /// 只把音视频 / 图片 / 二进制当作可缓存内容，避免把 HTML 错误页写进缓存。
@@ -1870,8 +1912,13 @@ class LocalRelay {
   }) async {
     final res = request.response;
     final rawQuery = request.uri.query;
+    final reqPath = request.uri.path;
+    final targetPath = reqPath.startsWith('/proxy/') &&
+            int.tryParse(reqPath.substring('/proxy/'.length)) == null
+        ? reqPath
+        : '/proxy';
     final target =
-        'http://127.0.0.1:$port/proxy'
+        'http://127.0.0.1:$port$targetPath'
         '${rawQuery.isEmpty ? '' : '?$rawQuery'}';
     final headers = <String, String>{};
     for (final name in const [
@@ -1896,10 +1943,41 @@ class LocalRelay {
       AppLog.w('relay', '转发取流 JVM 失败：$e');
       return false;
     }
-    if (!acceptErrorStatus && upstream.statusCode >= 400) {
-      await upstream.drain<void>().catchError((Object _) {});
-      AppLog.w('relay', '取流 JVM 未能处理该路由（HTTP ${upstream.statusCode}）');
-      return false;
+    List<int>? bufferedPlainM3u8;
+    if (!acceptErrorStatus) {
+      final ct = (upstream.headers.value(HttpHeaders.contentTypeHeader) ?? '')
+          .toLowerCase();
+      final isPlainText =
+          ct.contains('text/plain') &&
+          !ct.contains('mpegurl') &&
+          !ct.contains('m3u8');
+      final isNonMediaText =
+          (ct.contains('text/html') || ct.contains('application/json')) &&
+          !ct.contains('mpegurl') &&
+          !ct.contains('m3u8');
+      if (upstream.statusCode >= 400 ||
+          (request.method != 'HEAD' && upstream.contentLength == 0) ||
+          isNonMediaText) {
+        await upstream.drain<void>().catchError((Object _) {});
+        AppLog.w(
+          'relay',
+          '取流 JVM 返回无效媒体响应（HTTP ${upstream.statusCode}, ct=$ct, len=${upstream.contentLength}）',
+        );
+        return false;
+      }
+      if (isPlainText && request.method != 'HEAD') {
+        final bytes = await _readLimited(upstream);
+        final head = utf8.decode(bytes.take(64).toList(), allowMalformed: true).trimLeft();
+        if (head.startsWith('#EXTM3U')) {
+          bufferedPlainM3u8 = bytes;
+        } else {
+          AppLog.w(
+            'relay',
+            '取流 JVM 返回无效 text/plain 响应（HTTP ${upstream.statusCode}, len=${bytes.length}）',
+          );
+          return false;
+        }
+      }
     }
     res.statusCode = upstream.statusCode;
     _copyHeader(upstream, res, HttpHeaders.contentTypeHeader);
@@ -1908,6 +1986,12 @@ class LocalRelay {
     _copyHeader(upstream, res, HttpHeaders.contentRangeHeader);
     _copyHeader(upstream, res, HttpHeaders.contentEncodingHeader);
     if (request.method == 'HEAD') {
+      await res.close();
+      return true;
+    }
+    if (bufferedPlainM3u8 != null) {
+      res.headers.contentLength = bufferedPlainM3u8.length;
+      res.add(bufferedPlainM3u8);
       await res.close();
       return true;
     }
@@ -2383,7 +2467,8 @@ class LocalRelay {
         client ??
         (_client ??= HttpClient()
           ..connectionTimeout = const Duration(seconds: 15)
-          ..autoUncompress = false);
+          ..autoUncompress = false
+          ..findProxy = _findProxyDirectLoopback);
 
     Future<({HttpClientResponse response, String finalUrl})> send(
       HttpClient targetClient,
@@ -2406,6 +2491,7 @@ class LocalRelay {
       final insecure = _insecureClient ??= HttpClient()
         ..connectionTimeout = const Duration(seconds: 15)
         ..autoUncompress = false
+        ..findProxy = _findProxyDirectLoopback
         ..badCertificateCallback = (_, _, _) => true;
       return await send(insecure);
     }
@@ -2468,6 +2554,12 @@ class LocalRelay {
   /// initialize 超时都没触发过，就是这个原因。
   ///
   /// 取 12 秒：正常 CDN 首字节 < 1s；慢节点偶发 3-5s；超过 12s 基本可以判死。
+  static String _findProxyDirectLoopback(Uri uri) {
+    final h = uri.host.toLowerCase();
+    if (h == '127.0.0.1' || h == 'localhost' || h == '::1') return 'DIRECT';
+    return HttpClient.findProxyFromEnvironment(uri);
+  }
+
   static const _headerTimeout = Duration(seconds: 12);
 
   /// 关闭请求并等响应头；超时/失败都 abort 掉这条连接，避免句柄泄漏。

@@ -73,3 +73,6 @@ app.*.map.json
 /assets/jvm/shell-real/*.jar
 /assets/windows-runtimes/
 
+
+# 本地临时脚本 / 探针文件，绝不入库
+.tmp*

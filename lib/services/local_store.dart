@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:ui' show Size;
 
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../core/platform/credential_vault.dart';
@@ -331,7 +332,12 @@ class LocalStore {
       _prefs.setStringList(kLiveFavorites, keys);
 
   /// 首页顶部是否显示影视台词轮换。
-  bool get showMovieQuotes => _prefs.getBool(kShowMovieQuotes) ?? true;
+  ///
+  /// 安卓端默认关闭（手机上首屏空间宝贵，台词区会挤掉货架），
+  /// 用户手动打开过就按保存的值来。
+  bool get showMovieQuotes =>
+      _prefs.getBool(kShowMovieQuotes) ??
+      !(!kIsWeb && defaultTargetPlatform == TargetPlatform.android);
   Future<void> setShowMovieQuotes(bool value) =>
       _prefs.setBool(kShowMovieQuotes, value);
 

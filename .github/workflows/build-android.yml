@@ -33,6 +33,13 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Chaquopy 的 buildPython 需要与 APK 内 Python 同主次版本（3.12）。
+      # runner 与 pip 依赖都在构建期打包，不在运行时下载。
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
@@ -95,6 +102,36 @@ jobs:
       - name: Build release APK
         run: flutter build apk --release --target-platform android-arm64
 
+      # 只发布 arm64 包，但 Gradle 默认会把插件依赖里的 armeabi-v7a / x86_64
+      # 原生库一起塞进 APK（1.2.0 实测多带 25 MB）。这条断言防止回退。
+      - name: Verify APK only contains arm64 native libs
+        run: |
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          libs=$(unzip -l "$apk" | awk '{print $4}' | grep '^lib/' || true)
+          echo "$libs" | sort -u
+          if echo "$libs" | grep -Eq '^lib/(x86|x86_64|armeabi-v7a)/'; then
+            echo "::error::APK 包含非 arm64 原生库；检查 abiFilters / target-platform"
+            exit 1
+          fi
+          if ! echo "$libs" | grep -q '^lib/arm64-v8a/libflutter.so$'; then
+            echo "::error::APK 缺少 lib/arm64-v8a/libflutter.so"
+            exit 1
+          fi
+          echo "APK size: $(du -h "$apk" | cut -f1)"
+
+      # Chaquopy 没生效时 PY 蜘蛛会在运行时提示「内置运行库缺失」，
+      # 这里在 CI 直接兜住（libpython 必须真的打进 arm64 APK）。
+      - name: Verify bundled Python runtime
+        run: |
+          apk=build/app/outputs/flutter-apk/app-release.apk
+          if unzip -l "$apk" | grep -qE 'lib/arm64-v8a/libpython3\.12\.so|assets/chaquopy/'; then
+            echo "Python runtime bundled"
+            unzip -l "$apk" | grep -E 'libpython3\.12\.so|assets/chaquopy/' | head -20
+          else
+            echo "::error::APK 缺少 Python 运行时（libpython3.12.so / assets/chaquopy），Chaquopy 未生效"
+            exit 1
+          fi
+
       # 校验随包资源确实进了 APK，并生成清单方便核对。
       - name: Verify bundled shell-real assets
         run: |
@@ -126,6 +163,10 @@ jobs:
             'Lcom/github/catvod/crawler/SpiderApi;'
             'Lcom/github/catvod/crawler/SpiderDebug;'
             'Lcom/kniephos/kniephos/SpiderHostPlugin;'
+            'Lcom/kniephos/kniephos/TvBusPlugin;'
+            'Lcom/tvbus/engine/TVCore;'
+            'Lcom/tvbus/engine/Listener;'
+            'Lcom/fongmi/hook/Hook;'
             'Lokhttp3/Request$Builder;'
             'Lokhttp3/OkHttpClient;'
             'Lokio/Buffer;'

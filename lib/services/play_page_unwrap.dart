@@ -128,6 +128,7 @@ class PlayPageUnwrap {
     'drive.uc.cn', // UC 下载节点（裸域 drive.uc.cn 与子域都存在）
     'pcs.baidu.com', // 百度 PCS：d.pcs.baidu.com / c.pcs.baidu.com
     'baidupcs.com', // 百度 PCS 备用域
+    'bcebos.com', // 百度云对象存储 / CDN
     'aliyundrive.com', // 阿里云盘
     'alipan.com', // 阿里云盘（新域）
     '123pan.com', // 123 云盘
@@ -181,16 +182,21 @@ class PlayPageUnwrap {
     // 解析过一次没结果的页面不再重复抓，避免每集都卡十秒。
     if (_failed.contains(url)) return play;
     try {
-      final res = await _http.getText(
+      final res = await _http.probeText(
         url,
         headers: play.headers,
         timeout: const Duration(seconds: 10),
+        maxBytes: 512 << 10,
+        skipBinaryMedia: true,
       );
+      if (res != null) {
       final type = res.contentType.toLowerCase();
       // 本身已经是清单或媒体流：原地址可以直接播。
       if (type.contains('mpegurl') ||
-          type.startsWith('video/') ||
+                type.startsWith('video/') ||
+          type.startsWith('audio/') ||
           type.contains('octet-stream') ||
+          res.body.isEmpty ||
           res.body.trimLeft().startsWith('#EXTM3U')) {
         return play;
       }
@@ -200,6 +206,7 @@ class PlayPageUnwrap {
         AppLog.i('play', '云播页面解出直链 ${redactUrl(extracted)}');
         return _withUrl(play, extracted);
       }
+      }
     } catch (e) {
       AppLog.w('play', '云播页面解析失败 ${redactUrl(url)}', e);
     }
@@ -207,17 +214,21 @@ class PlayPageUnwrap {
     final fallback = _indexUrl(url);
     if (fallback != null) {
       try {
-        final res = await _http.getText(
+        final res = await _http.probeText(
           fallback,
           headers: play.headers,
           timeout: const Duration(seconds: 8),
+          maxBytes: 256 << 10,
+          skipBinaryMedia: true,
         );
+        if (res != null) {
         final type = res.contentType.toLowerCase();
         if (type.contains('mpegurl') ||
             res.body.trimLeft().startsWith('#EXTM3U')) {
           _remember(url, fallback);
           AppLog.i('play', '云播页面补 /index.m3u8 成功 ${redactUrl(fallback)}');
           return _withUrl(play, fallback);
+        }
         }
       } catch (_) {
         // 补路径也失败：保持原地址，让播放器给出明确错误

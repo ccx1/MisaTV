@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/foundation.dart';
@@ -62,6 +63,10 @@ part 'settings/dialogs.dart';
 part 'settings/font_packs_dialog.dart';
 part 'settings/runtime_tiles.dart';
 part 'settings/source_widgets.dart';
+
+/// 安卓端设置页使用原生 Material 列表样式（去掉玻璃拟态与 hover/自绘顶栏那套桌面语言）。
+bool get _androidSettingsUi =>
+    !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
 class SettingsPage extends StatefulWidget {
   const SettingsPage({super.key});
@@ -326,6 +331,10 @@ class SettingsPageState extends State<SettingsPage> {
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
     final theme = Theme.of(context);
+    final isWindows =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+    final isAndroid =
+        !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
     return LayoutBuilder(
       builder: (context, constraints) {
         final narrow = constraints.maxWidth < 760;
@@ -335,10 +344,10 @@ class SettingsPageState extends State<SettingsPage> {
             child: ListView(
               controller: _scroll,
               padding: EdgeInsets.fromLTRB(
-                narrow ? 18 : 28,
+                isAndroid ? 14 : (narrow ? 18 : 28),
                 8,
-                narrow ? 18 : 28,
-                120,
+                isAndroid ? 14 : (narrow ? 18 : 28),
+                isAndroid ? 96 : 120,
               ),
               children: [
                 Row(
@@ -350,7 +359,7 @@ class SettingsPageState extends State<SettingsPage> {
                           Text(
                             '设置',
                             style: theme.textTheme.headlineSmall?.copyWith(
-                              fontSize: 26,
+                              fontSize: isAndroid ? 22 : 26,
                             ),
                           ),
                           const SizedBox(height: 3),
@@ -647,11 +656,9 @@ class SettingsPageState extends State<SettingsPage> {
                 ],
                 if (_pageIndex == _accountPage && !kIsWeb) ...[
                   // 这两项只弹窗、没有可展开的子内容，但也必须像其他设置分类
-                  // 一样落在玻璃卡片里；直接放 ListTile 会变成一条裸露在页面
+                  // 一样落在卡片里；直接放 ListTile 会变成一条裸露在页面
                   // 背景上的深色长条，和上下卡片之间像被切开。
-                  GlassPanel(
-                    padding: const EdgeInsets.fromLTRB(18, 4, 18, 4),
-                    borderRadius: 24,
+                  _SettingsCard(
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
@@ -1849,8 +1856,7 @@ class SettingsPageState extends State<SettingsPage> {
                       ],
                     ),
                   ),
-                  if (!kIsWeb &&
-                      defaultTargetPlatform == TargetPlatform.windows) ...[
+                  if (isWindows || isAndroid) ...[
                     const SizedBox(height: 16),
                     _Section(
                       title: '运行时组件',
@@ -1858,11 +1864,15 @@ class SettingsPageState extends State<SettingsPage> {
                       collapsible: true,
                       initiallyExpanded: false,
                       trailing: Text(
-                        'MPV / Python / JVM / 加固壳 / 字体',
+                        isWindows
+                            ? 'MPV / Python / JVM / 加固壳 / 字体'
+                            : 'Python（内置）',
                         style: theme.textTheme.labelSmall,
                       ),
                       summary: Text(
-                        'Windows 完整版内置播放器与蜘蛛运行时；标题字体可按需下载',
+                        isWindows
+                            ? 'Windows 完整版内置播放器与蜘蛛运行时；标题字体可按需下载'
+                            : 'Python 3.12 随 APK 内置，PY 蜘蛛源可直接使用',
                         style: theme.textTheme.labelSmall?.copyWith(
                           color: theme.colorScheme.onSurface.withValues(
                             alpha: 0.45,
@@ -1871,41 +1881,45 @@ class SettingsPageState extends State<SettingsPage> {
                       ),
                       child: Column(
                         children: [
-                          const _MpvExtensionTile(),
-                          const Divider(height: 24),
+                          if (isWindows) ...[
+                            const _MpvExtensionTile(),
+                            const Divider(height: 24),
+                          ],
                           _PythonRuntimeTile(key: _pythonTileKey),
-                          const Divider(height: 24),
-                          _JvmRuntimeTile(key: _jvmTileKey),
-                          const Divider(height: 24),
-                          _ArmBridgeTile(key: _guardTileKey),
-                          const Divider(height: 24),
-                          AnimatedBuilder(
-                            animation: HeroFontService.instance,
-                            builder: (context, _) => _ActionRow(
-                              icon: Icons.font_download_outlined,
-                              title: '沉浸标题字体',
-                              subtitle: HeroFontService.instance.supported
-                                  ? '已安装 '
-                                        '${HeroFontService.instance.installedCount}/'
-                                        '${heroFontPacks.length} 个字体包'
-                                        ' · 按地区与类型自动匹配'
-                                  : '当前平台不支持运行时字体扩展',
-                              onTap: HeroFontService.instance.supported
-                                  ? () => _openHeroFonts(context)
-                                  : null,
-                            ),
-                          ),
-                          const Divider(height: 24),
-                          _ActionRow(
-                            icon: Icons.extension_outlined,
-                            title: '网盘下载支持库',
-                            subtitle: '在浏览器中打开 123 云盘分享页（提取码 Misa）',
-                            onTap: () => launchUrl(
-                              Uri.parse(
-                                'https://1824896562.share.123pan.cn/123pan/syh2jv-j1p6h?pwd=Misa#',
+                          if (isWindows) ...[
+                            const Divider(height: 24),
+                            _JvmRuntimeTile(key: _jvmTileKey),
+                            const Divider(height: 24),
+                            _ArmBridgeTile(key: _guardTileKey),
+                            const Divider(height: 24),
+                            AnimatedBuilder(
+                              animation: HeroFontService.instance,
+                              builder: (context, _) => _ActionRow(
+                                icon: Icons.font_download_outlined,
+                                title: '沉浸标题字体',
+                                subtitle: HeroFontService.instance.supported
+                                    ? '已安装 '
+                                          '${HeroFontService.instance.installedCount}/'
+                                          '${heroFontPacks.length} 个字体包'
+                                          ' · 按地区与类型自动匹配'
+                                    : '当前平台不支持运行时字体扩展',
+                                onTap: HeroFontService.instance.supported
+                                    ? () => _openHeroFonts(context)
+                                    : null,
                               ),
                             ),
-                          ),
+                            const Divider(height: 24),
+                            _ActionRow(
+                              icon: Icons.extension_outlined,
+                              title: '网盘下载支持库',
+                              subtitle: '在浏览器中打开 123 云盘分享页（提取码 Misa）',
+                              onTap: () => launchUrl(
+                                Uri.parse(
+                                  'https://1824896562.share.123pan.cn/123pan/syh2jv-j1p6h?pwd=Misa#',
+                                ),
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ),
@@ -2160,16 +2174,42 @@ class SettingsPageState extends State<SettingsPage> {
                               : app.clearSearchHistory,
                         ),
                         const Divider(height: 24),
-                        _ActionRow(
-                          icon: Icons.folder_open_rounded,
-                          title: '运行日志',
-                          subtitle: AppLog.directory.isEmpty
-                              ? 'Web 版不写本地日志'
-                              : '${AppLog.directory}（按天分文件，保留 14 天）',
-                          onTap: AppLog.directory.isEmpty
-                              ? null
-                              : () => AppLog.openDirectory(),
-                        ),
+                      _ActionRow(
+                                icon: Icons.folder_open_rounded,
+                                title: '运行日志',
+                                subtitle: AppLog.directory.isEmpty
+                                    ? 'Web 版不写本地日志'
+                                    : '${AppLog.directory}（点此打开目录或导出到下载/MisaTV）',
+                                onTap: AppLog.directory.isEmpty
+                                    ? null
+                                    : () async {
+                                        try {
+                                          final exported =
+                                              await AppLog.exportLatestLog();
+                                          if (exported != null) {
+                                            if (!context.mounted) return;
+                                            final msg = exported.isEmpty
+                                                ? '暂无可导出的日志文件'
+                                                : '已导出运行日志到：$exported';
+                                            ScaffoldMessenger.of(context)
+                                                .showSnackBar(
+                                              SnackBar(content: Text(msg)),
+                                            );
+                                            return;
+                                          }
+                                        } catch (e) {
+                                          if (context.mounted) {
+                                            ScaffoldMessenger.of(context)
+                                                .showSnackBar(
+                                              SnackBar(
+                                                  content: Text('导出日志失败：$e')),
+                                            );
+                                          }
+                                          return;
+                                        }
+                                        await AppLog.openDirectory();
+                                      },
+                              ),
                       ],
                     ),
                   ),
@@ -2321,6 +2361,33 @@ const _settingsPages = <(IconData, String)>[
   (Icons.shield_outlined, '安全与关于'),
 ];
 
+/// 设置页卡片容器：桌面沿用玻璃面板，安卓换成扁平 Material 卡片。
+class _SettingsCard extends StatelessWidget {
+  const _SettingsCard({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (_androidSettingsUi) {
+      return Material(
+        color: Theme.of(context).colorScheme.surfaceContainerLow,
+        borderRadius: BorderRadius.circular(16),
+        clipBehavior: Clip.antiAlias,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 4, 16, 4),
+          child: child,
+        ),
+      );
+    }
+    return GlassPanel(
+      padding: const EdgeInsets.fromLTRB(18, 4, 18, 4),
+      borderRadius: 24,
+      child: child,
+    );
+  }
+}
+
 class _SettingsPager extends StatelessWidget {
   const _SettingsPager({required this.index, required this.onChanged});
 
@@ -2330,6 +2397,58 @@ class _SettingsPager extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    if (_androidSettingsUi) {
+      // 安卓：Material 顶部 Tab（下划线指示器，可横向滚动），
+      // 不再用玻璃胶囊按钮，点击区域也更接近原生控件。
+      return SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            for (var i = 0; i < _settingsPages.length; i++)
+              InkWell(
+                onTap: () => onChanged(i),
+                child: Container(
+                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
+                  decoration: BoxDecoration(
+                    border: Border(
+                      bottom: BorderSide(
+                        width: 2,
+                        color: index == i
+                            ? theme.colorScheme.primary
+                            : Colors.transparent,
+                      ),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        _settingsPages[i].$1,
+                        size: 18,
+                        color: index == i
+                            ? theme.colorScheme.primary
+                            : theme.colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        _settingsPages[i].$2,
+                        style: theme.textTheme.labelLarge?.copyWith(
+                          color: index == i
+                              ? theme.colorScheme.primary
+                              : theme.colorScheme.onSurfaceVariant,
+                          fontWeight: index == i
+                              ? FontWeight.w700
+                              : FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+          ],
+        ),
+      );
+    }
     return GlassPanel(
       padding: const EdgeInsets.all(6),
       borderRadius: 20,
@@ -2452,6 +2571,55 @@ class _SectionState extends State<_Section> {
         ],
       ],
     );
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        if (!widget.collapsible || _expanded) ...[
+          const SizedBox(height: 12),
+          widget.child,
+        ] else if (widget.summary != null) ...[
+          const SizedBox(height: 10),
+          widget.summary!,
+        ],
+      ],
+    );
+    if (_androidSettingsUi) {
+      // 安卓：扁平 Material 分组 + 48dp 以上的点击行，去掉玻璃边框与阴影。
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 10),
+        child: Material(
+          color: theme.colorScheme.surfaceContainerLow,
+          borderRadius: BorderRadius.circular(16),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              if (widget.collapsible)
+                InkWell(
+                  onTap: () => setState(() => _expanded = !_expanded),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 16,
+                      vertical: 14,
+                    ),
+                    child: header,
+                  ),
+                )
+              else
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 0),
+                  child: header,
+                ),
+              if (!widget.collapsible || _expanded || widget.summary != null)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                  child: content,
+                ),
+            ],
+          ),
+        ),
+      );
+    }
     return GlassPanel(
       padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
       borderRadius: 24,

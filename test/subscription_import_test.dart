@@ -50,6 +50,7 @@ class _SubscriptionHttp extends AppHttp {
     Map<String, String>? headers,
     Duration timeout = const Duration(seconds: 15),
     int maxBytes = 32 << 10,
+    bool skipBinaryMedia = false,
     bool useDoh = false,
   }) => getText(url);
 }

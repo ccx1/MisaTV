@@ -18,8 +18,10 @@ import '../../core/utils/text_utils.dart';
 import '../../models/live.dart';
 import '../../models/site_config.dart';
 import '../../models/user_data.dart';
+import '../../models/vod.dart';
 import '../../services/live/epg.dart';
 import '../../services/live/live_ua_policy.dart';
+import '../../services/live/tvbus.dart';
 import '../../services/live_service.dart';
 import '../../services/boss_key/boss_key_service.dart';
 import '../../services/relay/local_relay.dart';
@@ -240,8 +242,19 @@ class _LivePlayerPageState extends State<LivePlayerPage>
       return url;
     }
     const known = <String>[
-      '.m3u8', '.m3u', '.mpd', '.flv', '.ts', '.mp4', '.mkv',
-      '.avi', '.mov', '.m4a', '.mp3', '.aac', '.ism',
+      '.m3u8',
+      '.m3u',
+      '.mpd',
+      '.flv',
+      '.ts',
+      '.mp4',
+      '.mkv',
+      '.avi',
+      '.mov',
+      '.m4a',
+      '.mp3',
+      '.aac',
+      '.ism',
     ];
     final path = uri.path.toLowerCase();
     if (known.any(path.endsWith)) return url;
@@ -260,7 +273,8 @@ class _LivePlayerPageState extends State<LivePlayerPage>
         for (final entry in headers.entries) {
           final name = entry.key.toLowerCase();
           // 这几个由 HttpClient 自己管理，手动写会抛异常。
-          if (name == 'host' || name == 'connection' ||
+          if (name == 'host' ||
+              name == 'connection' ||
               name == 'content-length') {
             continue;
           }
@@ -273,8 +287,10 @@ class _LivePlayerPageState extends State<LivePlayerPage>
         final resp = await req.close().timeout(const Duration(seconds: 4));
         final location = resp.headers.value('location');
         final status = resp.statusCode;
-        if (status < 300 || status >= 400 ||
-            location == null || location.isEmpty) {
+        if (status < 300 ||
+            status >= 400 ||
+            location == null ||
+            location.isEmpty) {
           break;
         }
         final next = Uri.tryParse(location);
@@ -293,10 +309,7 @@ class _LivePlayerPageState extends State<LivePlayerPage>
     }
     final result = current.toString();
     if (result != url) {
-      AppLog.i(
-        'live',
-        '直播重定向取址 ${redactUrl(url)} -> ${redactUrl(result)}',
-      );
+      AppLog.i('live', '直播重定向取址 ${redactUrl(url)} -> ${redactUrl(result)}');
     }
     return result;
   }
@@ -318,10 +331,7 @@ class _LivePlayerPageState extends State<LivePlayerPage>
     if (idx < 0 || idx + 1 >= _lines.length) return false;
     final next = _lines[idx + 1];
     _autoSwitchTried = true;
-    AppLog.i(
-      'live',
-      '线路失败自动切换 ${_channel.name} -> ${redactUrl(next.url)}',
-    );
+    AppLog.i('live', '线路失败自动切换 ${_channel.name} -> ${redactUrl(next.url)}');
     Future<void>.delayed(const Duration(milliseconds: 700), () {
       if (!mounted || seq != _openSeq) return;
       unawaited(_open(next));
@@ -369,6 +379,21 @@ class _LivePlayerPageState extends State<LivePlayerPage>
     old?.removeListener(_onPlayerValue);
     unawaited(old?.dispose());
     try {
+      // TVBus P2P：频道地址是 tvbus://，交给 Go 引擎换成它自己起的本地 HLS。
+      if (cleanUrl.startsWith('tvbus://')) {
+        final core = widget.bean.core;
+        if (core == null || !core.hasEngine) {
+          throw SourceException('该直播源没有配置 TVBus 引擎（core.so）');
+        }
+        cleanUrl = await TvBusService.instance.resolve(
+          url: cleanUrl,
+          core: core,
+          headers: headers,
+          baseUrl: widget.bean.url,
+        );
+        if (seq != _openSeq || !mounted) return;
+        AppLog.i('live', 'TVBus 播放地址 ${redactUrl(cleanUrl)}');
+      }
       // 蜘蛛直播的频道地址是本机 `/proxy?do=py`：点击时才向蜘蛛取动态地址。
       if (LiveService.isSpiderProxyUrl(cleanUrl)) {
         final app = AppScope.of(context);
@@ -425,9 +450,7 @@ class _LivePlayerPageState extends State<LivePlayerPage>
       setState(() {
         _buffering = false;
         _controls = true;
-        _error = switching
-            ? '当前线路无法播放，正在自动切换下一条线路…'
-            : _friendlyError(e);
+        _error = switching ? '当前线路无法播放，正在自动切换下一条线路…' : _friendlyError(e);
       });
       _syncSleepInhibitor();
     }
@@ -941,8 +964,7 @@ class _LivePlayerPageState extends State<LivePlayerPage>
       }
       return KeyEventResult.handled;
     }
-    if (key == LogicalKeyboardKey.keyH ||
-        key == LogicalKeyboardKey.f1) {
+    if (key == LogicalKeyboardKey.keyH || key == LogicalKeyboardKey.f1) {
       unawaited(showPlayerKeyHelp(context, live: true));
       return KeyEventResult.handled;
     }
@@ -968,8 +990,9 @@ class _LivePlayerPageState extends State<LivePlayerPage>
     final number = int.tryParse(raw) ?? 0;
     final channels = _channelsOfCurrentGroup();
     setState(() => _channelInput = '');
-    final channel =
-        number >= 1 && number <= channels.length ? channels[number - 1] : null;
+    final channel = number >= 1 && number <= channels.length
+        ? channels[number - 1]
+        : null;
     if (channel == null) {
       _toast('没有第 $number 个频道');
       return;
@@ -992,6 +1015,9 @@ class _LivePlayerPageState extends State<LivePlayerPage>
 
   @override
   void dispose() {
+    if (_channel.urls.any((url) => url.startsWith('tvbus://'))) {
+      unawaited(TvBusService.instance.stop());
+    }
     BossKeyService.instance.unbindPlayer(this);
     _hideTimer?.cancel();
     _detailsTimer?.cancel();
@@ -1009,11 +1035,34 @@ class _LivePlayerPageState extends State<LivePlayerPage>
     // 置顶只在本次播放会话内有效：离开直播播放器时无论如何都复位。
     unawaited(setAppWindowAlwaysOnTop(false));
     // 移动端：若因「自动横屏」改过方向与系统栏，离开时恢复默认方向与 edgeToEdge。
+    // 沉浸观影模式下保持隐藏系统栏，避免回到大屏外壳时状态栏闪出来。
     if (_landscapeUiApplied && _isMobile) {
-      unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+      final keepImmersive =
+          _immersiveMode &&
+          !kIsWeb &&
+          defaultTargetPlatform == TargetPlatform.android;
+      unawaited(
+        SystemChrome.setEnabledSystemUIMode(
+          keepImmersive ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+        ),
+      );
     }
     if (_isMobile) {
-      unawaited(SystemChrome.setPreferredOrientations(<DeviceOrientation>[]));
+      // 沉浸观影模式下保持横屏，避免回到大屏外壳时闪一下竖屏。
+      if (_immersiveMode &&
+          !kIsWeb &&
+          defaultTargetPlatform == TargetPlatform.android) {
+        unawaited(
+          SystemChrome.setPreferredOrientations(const <DeviceOrientation>[
+            DeviceOrientation.landscapeLeft,
+            DeviceOrientation.landscapeRight,
+          ]),
+        );
+      } else {
+        unawaited(
+          SystemChrome.setPreferredOrientations(const <DeviceOrientation>[]),
+        );
+      }
     }
     if (_fullscreen &&
         !_immersiveMode &&

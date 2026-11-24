@@ -18,10 +18,13 @@ class PyRuntimeProgress {
   final double? value;
 }
 
-/// 按需安装的嵌入式 Python 运行时（Windows 版 TVBox .py 蜘蛛依赖）。
+/// TVBox .py 蜘蛛的 Python 运行时。
 ///
-/// 不做 pip：直接下载 python-3.11.6-embed-amd64.zip，并把 requests 等
-/// wheel 解压进 `Lib/site-packages`（embed 包 _pth 隔离由 runner.py 手动注入 sys.path）。
+/// - Windows：按需下载 python-3.11.6-embed-amd64.zip，并把 requests 等
+///   wheel 解压进 `Lib/site-packages`（embed 包 _pth 隔离由 runner.py 手动注入 sys.path）。
+/// - Android：CPython 由 Chaquopy 随 APK 内置（Android 10+ 禁止执行应用数据目录
+///   里下载的可执行文件，不能照搬 Windows 的 python.exe）。这里只负责把
+///   runner.py / base/spider.py 落到私有目录，供进程内 `import runner` 使用。
 class PyRuntime {
   PyRuntime._();
   static final instance = PyRuntime._();
@@ -29,7 +32,7 @@ class PyRuntime {
   static const version = '3.11.6';
 
   /// runner.py / base/spider.py 的资源版本：升级后强制重写旧运行时里的这两个文件。
-  static const assetsVersion = 8;
+  static const assetsVersion = 9;
   static const _embedUrls = <String>[
     'https://mirrors.huaweicloud.com/python/$version/python-$version-embed-amd64.zip',
     'https://mirrors.aliyun.com/python-release/windows/python-$version-embed-amd64.zip',
@@ -93,15 +96,21 @@ class PyRuntime {
 
   final ValueNotifier<PyRuntimeProgress?> progress = ValueNotifier(null);
   Future<Directory>? _installing;
+  Future<void>? _patching;
   Directory? _cachedDir;
   bool? _cachedInstalled;
+
+  /// Android 端的 CPython 由 Chaquopy 内置，不走下载安装。
+  static bool get _isAndroid => !kIsWeb && Platform.isAndroid;
 
   Future<Directory> _dir() async {
     final cached = _cachedDir;
     if (cached != null) return cached;
     final support = await getApplicationSupportDirectory();
-    final dir = Directory(p.join(support.path, 'python', version));
-    await BundledRuntime.restore('python/$version', dir);
+    final dir = Directory(
+      p.join(support.path, 'python', _isAndroid ? 'android' : version),
+    );
+    if (!_isAndroid) await BundledRuntime.restore('python/$version', dir);
     _cachedDir = dir;
     return dir;
   }
@@ -113,6 +122,9 @@ class PyRuntime {
   bool get installing => _installing != null;
 
   Future<bool> installed() async {
+    // Android 的 CPython 由 Chaquopy 随 APK 内置：只要 APK 装好就可用。
+    // runner.py 是懒落盘的，不能拿它的存在与否判断运行时是否可用。
+    if (_isAndroid) return true;
     final cached = _cachedInstalled;
     if (cached != null) return cached;
     final dir = await _dir();
@@ -138,6 +150,16 @@ class PyRuntime {
   /// 时，这些源会在升级后第一次调用时自动修好，不需要用户重新安装。
   Future<void> ensurePatched() async {
     final dir = await _dir();
+    if (_isAndroid) {
+      // 没有 python.exe 可补；只需要把随包 runner.py / base/spider.py 落到私有目录，
+      // Kotlin 侧会把这个目录加进 sys.path 后 `import runner`。
+      if (await assetsCurrent()) return;
+      final running = _patching;
+      if (running != null) return running;
+      final task = _writeRunner(dir);
+      _patching = task;
+      return task.whenComplete(() => _patching = null);
+    }
     if (!File(p.join(dir.path, 'python.exe')).existsSync()) return;
     if (await assetsCurrent()) return;
     await ensureInstalled();
@@ -146,7 +168,16 @@ class PyRuntime {
   String? get installPath => _cachedDir?.path;
 
   /// 安装/补齐运行时；并发调用共享同一个任务。
-  Future<Directory> ensureInstalled({bool force = false}) {
+  Future<Directory> ensureInstalled({bool force = false}) async {
+    if (_isAndroid) {
+      final dir = await _dir();
+      if (force) {
+        await _writeRunner(dir);
+      } else {
+        await ensurePatched();
+      }
+      return dir;
+    }
     if (force) {
       _cachedInstalled = null;
       _installing = null;
@@ -446,6 +477,7 @@ class PyRuntime {
   }
 
   Future<void> _writeRunner(Directory dir) async {
+    dir.createSync(recursive: true);
     final runner = await rootBundle.loadString(
       'assets/python_runner/runner.py',
     );

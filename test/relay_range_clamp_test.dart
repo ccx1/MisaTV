@@ -103,5 +103,6 @@ void main() {
         'bytes=${100 * mb}-${132 * mb - 1}',
       );
     });
-  });
+    test('clampRange respects totalLength', () { expect(LocalRelay.clampRange('bytes=990763446-', totalLength: 992037521), 'bytes=990763446-992037520'); expect(LocalRelay.clampRange('bytes=0-', totalLength: 1024), 'bytes=0-1023'); });
+    });
 }
