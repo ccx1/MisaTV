@@ -269,12 +269,14 @@ jar 系蜘蛛**不读 `ext` 里的网盘凭据**，必须由应用主动落盘�
 
 ### GitHub 自动发布
 
-将发布提交推送到 `main`，或在 GitHub Actions 对 `main` 手动运行 **Build and publish Release**。
+发布 Pull Request 合入 fork 的 `main` 后运行 **Build and publish Release**，也可在 GitHub Actions 对 `main` 手动运行。
 发布版本取自 `lib/core/app_version.dart` 的 `kAppVersion`，格式为 `X.Y.Z.R`。
 `X.Y.Z` 是所基于的官方版本。首次发布从 `R = 1` 开始，同一官方版本内递增第四段。
 例如基于官方 `1.2.0` 依次发布 `v1.2.0.1`、`v1.2.0.2`，跟进官方 `1.3.0` 后从 `v1.3.0.1` 开始。
 Flutter 的 `pubspec.yaml` 保持 `X.Y.Z+N` 格式，前三段与 `kAppVersion` 一致，
-平台构建编号 `N` 随每次新发布递增。流水线校验版本并在各平台构建成功后公开 Release。
+平台构建编号 `N` 随每次新发布递增。每个新版本在同一个 PR 提交 `docs/releases/vX.Y.Z.R.md`，
+用中文描述用户可见变化、修复、适用平台和需要留意的升级事项。
+工作流在构建前检查对应文件是否存在且有正文，各平台构建和资产上传成功后用这份 Markdown 公开 Release。
 
 Release 提供 Windows x64 完整包、轻量包、Android arm64 APK、macOS arm64 ZIP 和
 `SHA256SUMS.txt`。发布任务下载上一个正式版本中同包型的 Windows ZIP，按文件 SHA-256 生成
