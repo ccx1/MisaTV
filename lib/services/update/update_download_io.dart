@@ -20,9 +20,20 @@ class UpdateDownloadCancelled implements Exception {
 class UpdateDownloader {
   static bool _updatingWindows = false;
 
-  static bool canInstallWindows(AppRelease release) =>
-      Platform.isWindows &&
-      (release.windowsDeltas.isNotEmpty || release.windowsPackages.isNotEmpty);
+  static String _windowsVariant(Directory installDir) {
+    final runtimes = p.join(installDir.path, 'runtimes');
+    if (!File(p.join(runtimes, 'ready.json')).existsSync()) return 'lite';
+    return File(p.join(runtimes, 'standard')).existsSync()
+        ? 'standard'
+        : 'full';
+  }
+
+  static bool canInstallWindows(AppRelease release) {
+    if (!Platform.isWindows) return false;
+    final variant = _windowsVariant(File(Platform.resolvedExecutable).parent);
+    return release.windowsDeltas.containsKey(variant) ||
+        release.windowsPackages.containsKey(variant);
+  }
 
   static Future<void> installWindows(
     AppRelease release, {
@@ -37,10 +48,7 @@ class UpdateDownloader {
     _updatingWindows = true;
     try {
       if (!await helper.exists()) throw StateError('应用目录缺少更新脚本');
-      final hasRuntimes = await File(
-        p.join(exe.parent.path, 'runtimes', 'ready.json'),
-      ).exists();
-      final variant = hasRuntimes ? 'full' : 'lite';
+      final variant = _windowsVariant(exe.parent);
       final delta = skipDelta ? null : release.windowsDeltas[variant];
       var deltaFailed = skipDelta;
       if (delta != null) {

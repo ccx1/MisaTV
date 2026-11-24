@@ -874,7 +874,11 @@ class _PythonRuntimeTileState extends State<_PythonRuntimeTile> {
                               ? '检查中'
                               : _builtIn || (_installed && bundled)
                               ? '已内置'
-                              : (_installed ? '已安装' : '未安装'),
+                              : _installed
+                              ? '已安装'
+                              : bundled
+                              ? '解释器已内置'
+                              : '未安装',
                           style: TextStyle(
                             fontSize: 9,
                             fontWeight: FontWeight.w700,
@@ -892,6 +896,8 @@ class _PythonRuntimeTileState extends State<_PythonRuntimeTile> {
                         ? '随 APK 内置（Python 3.12 + requests/lxml），PY 蜘蛛源可直接运行'
                         : _installed
                         ? 'PY 蜘蛛源可运行（Python 3.11 + requests/lxml）'
+                        : bundled
+                        ? 'Python 3.11 解释器已内置，可下载依赖库'
                         : '运行时缺失，可下载修复（Python 3.11 与依赖库，约 20 MB）',
                     style: theme.textTheme.labelSmall?.copyWith(
                       color: theme.colorScheme.onSurface.withValues(

@@ -110,6 +110,7 @@ void main() {
     const base = 'https://github.com/$kGithubRepo/releases/download/$tag';
     const full = 'MisaTV-delta-x64-full-v$kAppVersion-to-$tag.zip';
     const lite = 'MisaTV-delta-x64-lite-v$kAppVersion-to-$tag.zip';
+    const standard = 'MisaTV-delta-x64-standard-v$kAppVersion-to-$tag.zip';
     final digest = 'sha256:${'a' * 64}';
     final release = UpdateService.parseGithubRelease({
       'tag_name': tag,
@@ -117,12 +118,14 @@ void main() {
         {...asset(full, url: 'https://example.com/$full'), 'digest': digest},
         {...asset(lite, url: '$base/$lite'), 'digest': 'missing'},
         {...asset(full, url: '$base/$full'), 'digest': digest},
+        {...asset(standard, url: '$base/$standard'), 'digest': digest},
         asset('MisaTV-windows-x64-lite.zip'),
         asset('MisaTV-windows-x64.zip'),
       ],
     });
-    expect(release.windowsDeltas.keys, ['full']);
+    expect(release.windowsDeltas.keys, ['full', 'standard']);
     expect(release.windowsDeltas['full']?.url, '$base/$full');
+    expect(release.windowsDeltas['standard']?.url, '$base/$standard');
     expect(release.assetName, 'MisaTV-windows-x64.zip');
     expect(UpdateService.pickAsset([asset(full)]), isNull);
   });
@@ -131,6 +134,7 @@ void main() {
     const tag = 'v99.0.0.1';
     const full = 'MisaTV-windows-x64.zip';
     const lite = 'MisaTV-windows-x64-lite.zip';
+    const standard = 'MisaTV-windows-x64-standard.zip';
     const base = 'https://github.com/$kGithubRepo/releases/download/$tag';
     final digest = 'sha256:${'b' * 64}';
     final release = UpdateService.parseGithubRelease({
@@ -141,11 +145,13 @@ void main() {
         {...asset(lite, url: '$base/$lite'), 'digest': digest, 'size': 0},
         asset(lite, url: '$base/$lite'),
         {...asset(lite, url: '$base/$lite'), 'digest': digest},
+        {...asset(standard, url: '$base/$standard'), 'digest': digest},
       ],
     });
     expect(release.windowsPackages['full']?.name, full);
     expect(release.windowsPackages['lite']?.url, '$base/$lite');
     expect(release.windowsPackages['lite']?.digest, digest);
+    expect(release.windowsPackages['standard']?.url, '$base/$standard');
     expect(release.windowsDeltas, isEmpty);
   });
 

@@ -171,7 +171,7 @@ JVM 里的 jar 蜘蛛（自带 OkHttp）与 JS 蜘蛛的 curl 子进程——这
 | 类型 | 实现要点 |
 | --- | --- |
 | `.js` | QuickJS 在独立 isolate 执行，`req()` 由 curl 子进程提供同步语义；脚本落盘缓存 6 小时，断网回退旧缓存。超时**不能**用 `Isolate.immediate` 强杀（会把原生 runtime 拆掉，之后 native 代码访问已释放内存 → `quickjs_c_bridge.dll` 里 c0000409 闪退），要用 `beforeNextEvent` 等当前原生调用回到事件循环后再终止 |
-| `.py` | Windows 完整包内置 Python 3.11 与依赖；轻量包及源码构建可按需下载；Android 随 APK 内置 CPython 3.12；两端共用 `assets/python_runner/runner.py` |
+| `.py` | Windows 完整包内置 Python 3.11 与依赖，标准包内置解释器并按需安装库，轻量包及源码构建均按需下载；Android 随 APK 内置 CPython 3.12；两端共用 `assets/python_runner/runner.py` |
 | `jar` / DEX | 下载 jar → 若含 `classes.dex` 用 dex2jar 转换 → 反射调用 `stubs.jar` 里的 `SpiderRunner`；dex2jar 对 R8「去掉构造器」的 `NEW` 误译由 `DexJarRepair` 修正 |
 | 加固壳 | 首次用 unidbg ARM 桥解包，缓存到 `jvm_cache/payloads/<jar>/`；之后用 shell-shim（纯 Java 影子 `DexNative`）加载缓存，不再启动模拟器 |
 
@@ -278,11 +278,14 @@ Flutter 的 `pubspec.yaml` 保持 `X.Y.Z+N` 格式，前三段与 `kAppVersion` 
 用中文描述用户可见变化、修复、适用平台和需要留意的升级事项。
 工作流在构建前检查对应文件是否存在且有正文，各平台构建和资产上传成功后用这份 Markdown 公开 Release。
 
-Release 提供 Windows x64 完整包、轻量包、Android arm64 APK、macOS arm64 ZIP 和
+Release 提供 Windows x64 完整包、标准包、轻量包、Android arm64 APK、macOS arm64 ZIP 和
 `SHA256SUMS.txt`。发布任务下载上一个正式版本中同包型的 Windows ZIP，按文件 SHA-256 生成
-`MisaTV-delta-x64-<full|lite>-<旧标签>-to-<新标签>.zip`，包含新增和变更文件以及删除清单，
+`MisaTV-delta-x64-<full|standard|lite>-<旧标签>-to-<新标签>.zip`，包含新增和变更文件以及删除清单，
 并把差异包一并纳入校验列表。没有对应基线的包型首次只发布整包。跨过基线版本的客户端走整包下载。
 同一版本后续推送运行 Windows 检查及构建，产物可从 Actions 下载，已发布的版本及资产保持原样。
+
+标准包以 `runtimes/standard` 标记包型，裁剪版 JRE 的工作副本放在 `userdata/jvm-standard/`。
+完整包与轻量包继续使用原有的包型判断和工作目录。
 
 ## Windows 渲染与内存
 

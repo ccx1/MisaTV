@@ -110,7 +110,7 @@ jobs:
         run: |
           mkdir -p baseline
           previous_assets=$(gh release view "$BASE_TAG" --json assets --jq '.assets[].name')
-          for name in MisaTV-windows-x64.zip MisaTV-windows-x64-lite.zip; do
+          for name in MisaTV-windows-x64.zip MisaTV-windows-x64-lite.zip MisaTV-windows-x64-standard.zip; do
             if grep -Fxq -- "$name" <<< "$previous_assets"; then
               gh release download "$BASE_TAG" --pattern "$name" --dir baseline
               python ../tool/build_windows_delta.py \
@@ -124,10 +124,11 @@ jobs:
         run: |
           mv MisaTV-windows-x64/MisaTV-windows-x64.zip .
           mv MisaTV-windows-x64/MisaTV-windows-x64-lite.zip .
+          mv MisaTV-windows-x64/MisaTV-windows-x64-standard.zip .
           mv MisaTV-macos-arm64/MisaTV-macos-arm64.zip .
           mv misatv-android/build/app/outputs/flutter-apk/app-release.apk MisaTV-android-arm64.apk
           shopt -s nullglob
-          assets=(MisaTV-windows-x64.zip MisaTV-windows-x64-lite.zip
+          assets=(MisaTV-windows-x64.zip MisaTV-windows-x64-lite.zip MisaTV-windows-x64-standard.zip
             MisaTV-android-arm64.apk MisaTV-macos-arm64.zip MisaTV-delta-x64-*.zip)
           sha256sum "${assets[@]}" > SHA256SUMS.txt
 

@@ -103,7 +103,9 @@ MisaTV 启动后会检查更新。GitHub 请求失败时会尝试通过 `gh-prox
 - 解压即用（绿色版）：订阅、历史与运行时会放在软件目录下的 `userdata`，复制整个文件夹即可连数据一起带走；网盘 / 迅雷 / WebDAV 凭据受 Windows DPAPI 保护，换电脑或换用户后需重新登录。
 - 安装目录不可写（如 Program Files）时自动回落到 `%APPDATA%\com.kniephos\MisaTV`。
 - 首次运行请先阅读并同意使用声明，再到「设置」页导入你自己的站源 / 直播源。
-- JVM、加固壳支持、Python（含依赖库）与 Yaozhi MPV 已随 Windows 完整包提供，首次启动从本地初始化，无需另行下载或安装；设置页显示「已内置」。MPV 可在播放页切换使用。
+- **轻量包**（`MisaTV-windows-x64-lite.zip`）包含主程序与默认播放器。JVM、加固壳支持、Python 和 Yaozhi MPV 可按需安装。
+- **标准包**（`MisaTV-windows-x64-standard.zip`）按官方 1.3.0 后续随包配置提供裁剪版 JRE 17、dex2jar、JVM 宿主库、加固壳支持和 Python 解释器。Python 第三方库与 Yaozhi MPV 按需安装。
+- **完整包**（`MisaTV-windows-x64.zip`）内置 JVM、加固壳支持、Python 及依赖库和 Yaozhi MPV 整合包，首次启动可离线初始化。
 - Windows 更新提示中点击「下载并安装」，优先下载匹配当前版本和包型的差异包。没有匹配的差异包或差异更新失败时，改用同包型的整包。校验通过后应用会自动退出、覆盖程序文件并重启，保留 `userdata/`。
 
 ## Q&A
@@ -121,7 +123,7 @@ A: 多数是源站自身问题：站点失效、需要 `ext` 配置、需要登�
 
 #### Q: 第一次进 JAR / 加固壳源为什么还要等待？
 
-A: Windows 完整包已内置运行时，不需要联网安装扩展。源文件首次使用仍需转换，加固壳源还要用 ARM 桥解包一次（约 20–30 秒），完成后缓存复用。等待期间首页会显示转换 / 解包提示。
+A: Windows 标准包和完整包都内置了 JAR 与加固壳运行时。源文件首次使用仍需转换，加固壳源还要用 ARM 桥解包一次（约 20–30 秒），完成后缓存复用。等待期间首页会显示转换 / 解包提示。
 
 #### Q: 为什么网盘播放要求先登录？
 
@@ -175,11 +177,13 @@ flutter run -d android       # 64 位设备 / 模拟器；构建机需要 Python
 flutter run -d chrome
 ```
 
-Windows 完整包先在构建机器准备四项运行时（需要 PowerShell 7、Python 与 pip；第三方二进制不进入 Git），再构建。GitHub Windows 发布工作流自动执行这两步：
+构建 Windows 三档发布包需要 PowerShell 7、Python / pip 和 JDK 17（`JAVA_HOME`）。GitHub Windows 发布工作流自动执行以下命令。
 
 ```powershell
 ./tool/prepare_windows_runtimes.ps1
+./tool/prepare_windows_runtimes.ps1 -Standard
 flutter build windows --release
+./tool/package_windows.ps1 -OutputDirectory build/packages
 ```
 
 产物中的 `runtimes/` 必须随 EXE 一起分发；不要打包 `userdata/`。首次启动把运行时初始化到应用数据目录，安装目录不可写时同样可用。完整包包含 MPV 整合包，体积会明显增大。
