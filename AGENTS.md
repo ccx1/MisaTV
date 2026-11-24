@@ -123,9 +123,10 @@ flutter build windows --release
 - Fork 的应用与发布版本采用 `X.Y.Z.R`。前三段是所基于的官方版本，第四段从 `1` 开始，同一官方版本内逐次递增。基于官方 `1.2.0` 时依次用 `1.2.0.1`、`1.2.0.2`。跟进官方 `1.3.0` 后从 `1.3.0.1` 开始。
 - `lib/core/app_version.dart` 的 `kAppVersion` 记录完整四段版本，GitHub Release 和标签使用 `vX.Y.Z.R`。Flutter 的 `pubspec.yaml` 保持 `X.Y.Z+N` 格式，前三段与应用版本一致，平台构建编号 `N` 随每次新发布递增。
 - 校验应用版本与 Flutter 版本的一致性。普通修复或文档任务不自动升级版本。
-- 提交时仅暂存本次任务相关文件，保留其他未提交改动。
-- 用户要求提交并推送时，每次都要构建本次提交对应的 Release 版本。需要发布时按四段版本规则递增应用版本和 Flutter 构建编号，推送到本项目 fork 的 `main`，跟进 **Build and publish Release** 完成并核验发布资产与 SHA-256。
-- 仅提交的任务按用户授权范围处理推送、标签和发布。
+- 新任务从目标分支创建 `feature/ccx_yyyyMMdd_<改动缩写>` 分支。日期使用创建当天的八位年月日，末尾使用能识别本次改动的简短缩写，例如 `feature/ccx_20261124_sync130`。已有任务沿用其分支。
+- 提交时仅暂存本次任务相关文件。推送只推任务分支，由用户创建和合并 Pull Request。每次提交并推送都要对任务分支的提交构建 Release 产物，可使用本地构建或在 GitHub Actions 手动运行 Windows 构建工作流。
+- 正式版本随 Pull Request 合入 fork 的 `main` 后发布。发布 PR 需递增应用版本和 Flutter 构建编号，并随提交提供 `docs/releases/vX.Y.Z.R.md`。用中文写清相对上一个正式版本的用户可见变化、修复和适用平台，必要时说明升级方式或兼容性变化。
+- **Build and publish Release** 读取对应版本的 Markdown 作为 GitHub Release 正文。发布后核验正文、发布资产与 SHA-256。
 
 Android / macOS 构建分别参考 [.github/workflows/build-android.yml](.github/workflows/build-android.yml) 和 [.github/workflows/build-macos.yml](.github/workflows/build-macos.yml)。Android 使用 ART / DexClassLoader，不能套用 Windows JRE 安装逻辑；macOS 的 `.app` 打包需保留权限与符号链接。Windows 构建和打包检查见 [.github/workflows/build.yml](.github/workflows/build.yml)。
 

@@ -54,25 +54,18 @@ class JvmRuntime {
   }
 
   /// JRE 压缩包；解压后取「含 bin/java.exe」的那层目录。
-  /// 多个镜像 + GitHub 加速代理，下载前并发测速取最快（国内直连 GitHub 常超时）。
+  /// 多个镜像：非 GitHub 镜像保留，GitHub 资产统一走 gh-proxy。
   static const _jreUrls = <String>[
     'https://mirrors.huaweicloud.com/openjdk/17.0.2/openjdk-17.0.2_windows-x64_bin.zip',
     'https://mirrors.tuna.tsinghua.edu.cn/Adoptium/17/jre/x64/windows/'
         'OpenJDK17U-jre_x64_windows_hotspot_17.0.20.1_1.zip',
-    'https://ghfast.top/https://github.com/adoptium/temurin17-binaries/releases/download/'
-        'jdk-17.0.20.1%2B1/OpenJDK17U-jre_x64_windows_hotspot_17.0.20.1_1.zip',
     'https://gh-proxy.com/https://github.com/adoptium/temurin17-binaries/releases/download/'
-        'jdk-17.0.20.1%2B1/OpenJDK17U-jre_x64_windows_hotspot_17.0.20.1_1.zip',
-    'https://github.com/adoptium/temurin17-binaries/releases/download/'
         'jdk-17.0.20.1%2B1/OpenJDK17U-jre_x64_windows_hotspot_17.0.20.1_1.zip',
   ];
 
-  /// dex2jar 整合包；解压后取 lib 目录下的 jar。
+  /// dex2jar 整合包；GitHub 资产统一走 gh-proxy。
   static const _dexToolsUrls = <String>[
-    'https://ghfast.top/https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip',
     'https://gh-proxy.com/https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip',
-    'https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip',
-    'https://ghproxy.net/https://github.com/pxb1988/dex2jar/releases/download/v2.4/dex-tools-v2.4.zip',
   ];
 
   /// Maven 相对路径（阿里云镜像优先，回退 Maven Central）。

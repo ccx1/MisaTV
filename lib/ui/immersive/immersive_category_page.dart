@@ -110,11 +110,11 @@ class _ImmersiveCategoryPageState extends State<ImmersiveCategoryPage> {
           slivers: [
             SliverToBoxAdapter(
               child: Container(
-                height: m.compact ? m.topPadding + 56 : 72,
+                height: m.chromeCompact ? m.topPadding + 56 : 72,
                 padding: EdgeInsets.only(
                   left: horizontal,
                   right: horizontal,
-                  top: m.compact ? m.topPadding : 0,
+                  top: m.chromeCompact ? m.topPadding : 0,
                 ),
                 decoration: const BoxDecoration(
                   gradient: LinearGradient(
@@ -141,7 +141,7 @@ class _ImmersiveCategoryPageState extends State<ImmersiveCategoryPage> {
                         fontWeight: FontWeight.w900,
                       ),
                     ),
-                    if (!m.compact) ...[
+                    if (!m.chromeCompact) ...[
                       const SizedBox(width: 12),
                       Flexible(
                         child: Text(

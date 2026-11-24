@@ -1186,9 +1186,16 @@ class _DetailPageState extends State<DetailPage> {
         : splitMetaHints(detail.area);
     final controller = _immersiveEpsScroll ??= ScrollController();
     final bottomScroll = _immersiveBottomScroll ??= ScrollController();
-    final bottomHeight = (MediaQuery.sizeOf(context).height * 0.31)
-        .clamp(m.compact ? 190.0 : 244.0, m.compact ? 240.0 : 300.0)
-        .toDouble();
+    final viewportHeight = MediaQuery.sizeOf(context).height;
+    // 手机横屏（矮屏）高度有限：底栏收窄，否则主信息区只剩几十像素。
+    final double bottomHeight;
+    if (m.compact) {
+      bottomHeight = (viewportHeight * 0.31).clamp(180.0, 240.0).toDouble();
+    } else if (m.short) {
+      bottomHeight = (viewportHeight * 0.4).clamp(130.0, 180.0).toDouble();
+    } else {
+      bottomHeight = (viewportHeight * 0.31).clamp(244.0, 300.0).toDouble();
+    }
 
     final currentIndex = history == null
         ? -1
@@ -1322,7 +1329,12 @@ class _DetailPageState extends State<DetailPage> {
                 child: Column(
                   children: [
                     Padding(
-                      padding: EdgeInsets.fromLTRB(m.gutter, 18, m.gutter, 0),
+                      padding: EdgeInsets.fromLTRB(
+                        m.gutter,
+                        m.short ? 10 : 18,
+                        m.gutter,
+                        0,
+                      ),
                       child: Row(
                         children: [
                           Row(
@@ -2549,7 +2561,13 @@ class _DetailHeader extends StatelessWidget {
         : coverUrl == fallbackCover
         ? fallbackCoverHeaders
         : const <String, String>{};
-    final posterWidth = narrow ? 170.0 : 210.0;
+    // 手机上收窄海报，给右侧标题 / 评分 / 主演留出可读宽度。
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final mobileLayout =
+        narrow && !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
+    final posterWidth = mobileLayout
+        ? (screenWidth * 0.30).clamp(96.0, 132.0).toDouble()
+        : (narrow ? 170.0 : 210.0);
     final posterHeight = posterWidth * 1.5;
     final poster = MouseRegion(
       cursor: coverUrl.isEmpty
@@ -2600,14 +2618,18 @@ class _DetailHeader extends StatelessWidget {
       HoverMarqueeText(
         title,
         maxLines: 2,
-        textAlign: narrow ? TextAlign.center : TextAlign.left,
+        textAlign: narrow && !mobileLayout
+            ? TextAlign.center
+            : TextAlign.left,
         style: theme.textTheme.headlineMedium?.copyWith(
-          fontSize: narrow ? 26 : 34,
+          fontSize: mobileLayout ? 22 : (narrow ? 26 : 34),
         ),
       ),
       const SizedBox(height: 12),
       Wrap(
-        alignment: narrow ? WrapAlignment.center : WrapAlignment.start,
+        alignment: narrow && !mobileLayout
+            ? WrapAlignment.center
+            : WrapAlignment.start,
         spacing: 8,
         runSpacing: 8,
         children: [
@@ -2646,7 +2668,9 @@ class _DetailHeader extends StatelessWidget {
           ].where((s) => s.isNotEmpty).join('  ·  '),
           maxLines: 2,
           overflow: TextOverflow.ellipsis,
-          textAlign: narrow ? TextAlign.center : TextAlign.left,
+          textAlign: narrow && !mobileLayout
+              ? TextAlign.center
+              : TextAlign.left,
           style: theme.textTheme.bodySmall?.copyWith(
             color: theme.colorScheme.onSurface.withValues(alpha: 0.72),
             height: 1.5,
@@ -2684,22 +2708,71 @@ class _DetailHeader extends StatelessWidget {
     );
 
     if (narrow) {
-      return Column(
-        children: [
-          poster,
-          const SizedBox(height: 20),
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.center,
-            children: [
-              ...heading,
-              if (intro != null) ...[
-                const SizedBox(height: 12),
-                SizedBox(height: 150, child: intro),
+      if (!mobileLayout) {
+        // 非安卓的窄窗口保持原来的居中版式。
+        return Column(
+          children: [
+            poster,
+            const SizedBox(height: 20),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                ...heading,
+                if (intro != null) ...[
+                  const SizedBox(height: 12),
+                  SizedBox(height: 150, child: intro),
+                ],
+                const SizedBox(height: 14),
+                if (showPlay) playRow,
               ],
-              const SizedBox(height: 14),
-              if (showPlay) playRow,
+            ),
+          ],
+        );
+      }
+      // 手机竖屏：海报与标题并排（避免整块居中把首屏撑得过长），
+      // 简介单独成段，播放键占满整行，符合常见安卓影视 App 的排版。
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              poster,
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: heading,
+                ),
+              ),
             ],
           ),
+          if (intro != null) ...[
+            const SizedBox(height: 14),
+            SizedBox(height: 120, child: intro),
+          ],
+          const SizedBox(height: 16),
+          if (showPlay) ...[
+            SizedBox(
+              width: double.infinity,
+              height: 46,
+              child: FilledButton.icon(
+                onPressed: onPlay,
+                icon: const Icon(Icons.play_arrow_rounded),
+                label: Text(playLabel),
+              ),
+            ),
+            if (progress > 0.01) ...[
+              const SizedBox(height: 8),
+              Text(
+                '已看 ${(progress * 100).round()}%',
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: AppTheme.accentForeground(theme.colorScheme),
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+            ],
+          ],
         ],
       );
     }

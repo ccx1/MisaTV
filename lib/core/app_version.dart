@@ -1,5 +1,5 @@
 /// Fork 应用版本使用官方版本加第四段修订号。
-const String kAppVersion = '1.2.0.2';
+const String kAppVersion = '1.3.0.1';
 
 /// 检查更新走的仓库。
 const String kGithubRepo = 'ccx1/MisaTV';

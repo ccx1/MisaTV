@@ -22,6 +22,7 @@ import 'services/cms_source.dart';
 import 'services/fonts/hero_fonts.dart';
 import 'services/jar_spider_service.dart';
 import 'services/js_spider_service.dart';
+import 'services/live/tvbus.dart';
 import 'services/live_service.dart';
 import 'services/local_store.dart';
 import 'services/player/external_playlist.dart';
@@ -234,6 +235,7 @@ Future<void> _bootstrap(List<String> args) async {
       if (bossKey != null) await step('tray', bossKey.shutdown);
       // 再关独立播放器窗口：它有自己的 JVM/中继，必须在进程退出前收尾。
       await step('close-player-windows', closeAllStandalonePlayerWindows);
+      await step('tvbus', TvBusService.instance.shutdown);
       await step('spiders', sourceService.shutdown);
       try {
         state.watchParty.leave();

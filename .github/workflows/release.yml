@@ -58,6 +58,11 @@ jobs:
               echo "::error::$tag 低于已发布的 $latest_tag，请提高 fork 版本"
               exit 1
             fi
+            notes_file="docs/releases/$tag.md"
+            if ! grep -q '[^[:space:]]' "$notes_file"; then
+              echo "::error file=$notes_file::新版本需要提交非空的更新说明"
+              exit 1
+            fi
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -151,9 +156,10 @@ jobs:
           fi
 
           # 创建草稿后上传资产，所有上传成功才公开。重跑时继续同一提交的草稿。
+          notes_file="../docs/releases/$RELEASE_TAG.md"
           if [[ -z "$release" ]]; then
             gh release create "$RELEASE_TAG" --target "$GITHUB_SHA" \
-              --title "MisaTV $RELEASE_TAG" --generate-notes --draft
+              --title "MisaTV $RELEASE_TAG" --notes-file "$notes_file" --draft
           fi
           gh release upload "$RELEASE_TAG" "${assets[@]}" SHA256SUMS.txt --clobber
-          gh release edit "$RELEASE_TAG" --draft=false
+          gh release edit "$RELEASE_TAG" --notes-file "$notes_file" --draft=false

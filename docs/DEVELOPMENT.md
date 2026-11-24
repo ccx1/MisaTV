@@ -30,6 +30,41 @@ AppState ──> SourceService ──> CmsSource      (type 0 / 1 / 4，MoviePar
 节目单来自 `EpgService.loadProgramsFor`（只保留最近 7 天到未来 1 天），
 回看走 `openRawPlayback` 的临时会话（不写观看历史、不参与自动换源）。
 
+## TVBus（Go P2P 直播）
+
+只在 Android 生效。直播源的 `lives[].core` 里通常带 `so` / `auth` / `resp` /
+`name` / `pass` / `broker` / `domain` / `option`，频道地址以 `tvbus://` 开头。
+
+```text
+LivePlayerPage 发现 tvbus://
+  → TvBusService 下载 core.so 到 <support>/tvbus/<md5>.so（校验 ELF64 + AArch64）
+  → Kotlin TvBusPlugin 用 com.tvbus.engine.TVCore System.load 并启动
+  → core.resp 非空时 auth 指向本机 /tvbus；否则用 core.auth
+  → 引擎 onPrepared 返回本地 HLS → 交给 video_player/fvp
+```
+
+关键约束：
+
+1. **没有“通用 Go 运行时 APK”**。`core.so` 是每个直播源自己的 Go 引擎，
+   内容/协议都可能不同；FongMi/TV 也是按源下载 `.so`，主 APK 只带很薄的
+   Java 包装（`TVCore` / `Listener`）。因此 `assets/jvm` 里的 `GoProxy` 影子
+   类与这里无关，不要混用。
+2. **JNI 名字不能改**。Go `.so` 按 `Java_com_tvbus_engine_TVCore_*` 查找
+   类和方法；`proguard-rules.pro` 已 keep `com.tvbus.engine.**` 与 native
+   方法。改包名/类名/方法签名都会 `UnsatisfiedLinkError`。
+3. **只支持 arm64**。APK 本身只发 64 位；引擎不是 ELF64 + AArch64 时直接报错。
+   下载后 Kotlin 侧 `Os.chmod 0444`，满足 Android 14 对动态加载文件只读的要求。
+4. **引擎生命周期跟页面走**。直播页销毁 / 切走 tvbus 频道时 `stop()`，应用退出
+   `shutdown()` 调 `quit()`。Go 引擎起的是本机 HLS 服务，进程内不可强杀；
+   和 Python 一样，不要假设能像桌面外部进程那样回收。
+5. **core.resp 可能含鉴权信息**。`/tvbus` 只监听 127.0.0.1，仍属于本机可访问
+   路由；不要在外部播放器 URL 或日志里暴露它。
+6. **core.pkg / core.sign 用局部 Hook**。`TvBusPlugin` 只把一个
+   `ContextWrapper` 交给 `TVCore`，在它上面伪造 `getPackageManager()` /
+   `getPackageName()`，且只在引擎 `init()` 期间生效；不要改成全局替换
+   Application，否则会污染 Flutter 自己的包名查询。Hook 实现来自
+   `app/libs/hook-release.aar`（FongMi/TV，GPL-3.0，约 5KB）。
+
 ## 本地中继
 
 单例 `LocalRelay`，首选 `127.0.0.1:9978`，被占用时换临时端口（生成的中继地址都带真实端口）。
@@ -42,6 +77,7 @@ AppState ──> SourceService ──> CmsSource      (type 0 / 1 / 4，MoviePar
 | `/bt/<infohash>/<index>` | 磁力 Range 取流 + piece 门控（512KB 一片） |
 | `/ext/<token>/<index>` | 第三方播放器选集：按需解析后 302 到真实播放地址 |
 | `/proxy` `/proxy/<port>` | 直播代理；壳内路由（如 `do=hmys`）原样转发给常驻取流 JVM |
+| `/tvbus` | TVBus Go 引擎的配置：返回当前直播源的 `core.resp`（没有配置时为空串） |
 
 两个必须遵守的约束：
 
@@ -135,7 +171,7 @@ JVM 里的 jar 蜘蛛（自带 OkHttp）与 JS 蜘蛛的 curl 子进程——这
 | 类型 | 实现要点 |
 | --- | --- |
 | `.js` | QuickJS 在独立 isolate 执行，`req()` 由 curl 子进程提供同步语义；脚本落盘缓存 6 小时，断网回退旧缓存。超时**不能**用 `Isolate.immediate` 强杀（会把原生 runtime 拆掉，之后 native 代码访问已释放内存 → `quickjs_c_bridge.dll` 里 c0000409 闪退），要用 `beforeNextEvent` 等当前原生调用回到事件循环后再终止 |
-| `.py` | Windows 完整包内置 Python 3.11 与依赖；源码构建可按需下载；`assets/python_runner/runner.py` 是桥 |
+| `.py` | Windows 完整包内置 Python 3.11 与依赖；轻量包及源码构建可按需下载；Android 随 APK 内置 CPython 3.12；两端共用 `assets/python_runner/runner.py` |
 | `jar` / DEX | 下载 jar → 若含 `classes.dex` 用 dex2jar 转换 → 反射调用 `stubs.jar` 里的 `SpiderRunner`；dex2jar 对 R8「去掉构造器」的 `NEW` 误译由 `DexJarRepair` 修正 |
 | 加固壳 | 首次用 unidbg ARM 桥解包，缓存到 `jvm_cache/payloads/<jar>/`；之后用 shell-shim（纯 Java 影子 `DexNative`）加载缓存，不再启动模拟器 |
 
@@ -150,6 +186,28 @@ JVM 里的 jar 蜘蛛（自带 OkHttp）与 JS 蜘蛛的 curl 子进程——这
 ```powershell
 ./tool/build_jvm_stubs.ps1 -Jdk 'C:\path\to\jdk17'
 ```
+
+### Android 的 Python 运行时（Chaquopy）
+
+Android 10（API 29）起，targetSdk ≥ 29 的应用不能 `exec()` 应用数据目录里的文件
+（Termux 为此长期停在 targetSdk 28），所以 Windows 的「下载 python.exe 再
+`Process.run`」在 Android 上必然失败。Android 端改为 Chaquopy：
+
+- CPython 3.12 与 pip 依赖在构建期打进 APK（`android/app/build.gradle.kts` 的
+  `chaquopy` 块），运行时不下载；
+- `PythonHostPlugin.kt` 通过 MethodChannel `com.kniephos.kniephos/python` 在应用进程内
+  调用 `runner.py` 的 `inproc_*` 入口，信封格式与桌面进程版一致；
+- `PyRuntime` 在 Android 上只负责把 `runner.py` / `base/spider.py` 落到
+  应用私有目录 `python/android`，`installed()` 恒为 true；
+- **只支持 64 位 ABI**：Python 3.12 没有 armeabi-v7a。Gradle 按 Flutter 的
+  `target-platform` 只保留 arm64-v8a / x86_64，显式指定 `android-arm` 会构建失败；
+- 构建机需要 Python 3.12（Chaquopy 的 `buildPython` 要求同主次版本），CI 已配置。
+
+进程内模式的两个限制，改代码时不要假设桌面端那套隔离仍然存在：
+
+1. Python 段错误会带崩整个 App（桌面端是独立进程，最多失败一次调用）；
+2. 调用超时只能让 Dart 侧先返回，Python 线程本身没有安全的强杀手段。
+   `_PyHost` 在 Android 上的实现只是让 Python 丢弃实例并尽量调 `destroy()`。
 
 jar 系蜘蛛**不读 `ext` 里的网盘凭据**，必须由应用主动落盘到固定位置
 （`.quarkcookie`、prefs 种子、Pizazz、`Cloud-drive.txt`、`TVBox/*.txt`），缺一个就会显示「还没有配置夸克 Cookie」。
@@ -211,12 +269,14 @@ jar 系蜘蛛**不读 `ext` 里的网盘凭据**，必须由应用主动落盘�
 
 ### GitHub 自动发布
 
-将发布提交推送到 `main`，或在 GitHub Actions 对 `main` 手动运行 **Build and publish Release**。
+发布 Pull Request 合入 fork 的 `main` 后运行 **Build and publish Release**，也可在 GitHub Actions 对 `main` 手动运行。
 发布版本取自 `lib/core/app_version.dart` 的 `kAppVersion`，格式为 `X.Y.Z.R`。
 `X.Y.Z` 是所基于的官方版本。首次发布从 `R = 1` 开始，同一官方版本内递增第四段。
 例如基于官方 `1.2.0` 依次发布 `v1.2.0.1`、`v1.2.0.2`，跟进官方 `1.3.0` 后从 `v1.3.0.1` 开始。
 Flutter 的 `pubspec.yaml` 保持 `X.Y.Z+N` 格式，前三段与 `kAppVersion` 一致，
-平台构建编号 `N` 随每次新发布递增。流水线校验版本并在各平台构建成功后公开 Release。
+平台构建编号 `N` 随每次新发布递增。每个新版本在同一个 PR 提交 `docs/releases/vX.Y.Z.R.md`，
+用中文描述用户可见变化、修复、适用平台和需要留意的升级事项。
+工作流在构建前检查对应文件是否存在且有正文，各平台构建和资产上传成功后用这份 Markdown 公开 Release。
 
 Release 提供 Windows x64 完整包、轻量包、Android arm64 APK、macOS arm64 ZIP 和
 `SHA256SUMS.txt`。发布任务下载上一个正式版本中同包型的 Windows ZIP，按文件 SHA-256 生成
@@ -234,6 +294,54 @@ Flutter 3.47 在 Windows 默认走 Impeller OpenGLESSDF 后端，本项目的圆
 图片解码同时收敛：`imageCache` 上限 48MB / 220 张（`main.dart`），海报 `cacheWidth: 320`、
 详情背景 960、收藏与直播台标 200 / 128。首页背景只用一层对角渐变，用 `CustomPainter`
 （`AppBackdropPainter`）画在内容之下的同一绘制层，不用溢出视口的 `Stack`。
+
+## Android APK 体积
+
+1.2.0 的 arm64 发布包约 97 MB，主要构成（压缩后）：
+
+| 内容 | 大小 | 备注 |
+| --- | ---: | --- |
+| `lib/arm64-v8a/*` | ~42 MB | `libapp` / `libflutter` / `libffmpeg` / `libmdk` 等 |
+| `lib/armeabi-v7a/*` + `lib/x86_64/*` | ~25 MB | **不应出现**：Flutter 默认 abiFilters 把插件自带的多 ABI `.so` 一起打进来 |
+| `assets/fonts` | ~26 MB | 5 个 MiSans 字重，每个压缩后约 5.2 MB |
+
+两条约束，改动前先看：
+
+1. **Android 只发 64 位 arm64**。`android/app/build.gradle.kts` 按 Flutter 的
+   `target-platform` 清空并重设 `ndk.abiFilters`；CI 会断言 APK 的 `lib/` 下
+   没有 `armeabi-v7a` / `x86_64`，出现即失败。新增原生插件后如果体积突然变大，
+   先检查它是否又带进了别的 ABI。
+2. **MiSans 只随包 400 / 500 / 700 三个字重**。Demibold / Heavy 文件仍在
+   `assets/fonts/`，但不在 `pubspec.yaml` 的 fonts 列表里；需要时再加回去，
+   每个字重约 +5.2 MB（压缩后）。600 / 800 的样式由 Flutter 匹配到最近字重。
+
+Windows 专用的 `assets/jvm/`、`assets/aria2/aria2c.exe`、
+`assets/python_runner/windows-ca.pem` 在 Android 上没有读取者；本地构建若把
+`aria2c.exe` 放进了 assets，会额外占约 5.4 MB。发布 CI 不包含这些文件。
+
+### 参考 FongMi/TV 的运行时模块
+
+FongMi/TV 的主 APK 用 `splits.abi` 只出 arm64 / armv7，并通过
+`AbiApkPackaging` 把 `libmpv` / `libplayer` / `libnode` /
+`libquickjs-wrapper` 等从主包排除；Python、Node.js、QuickJS、Thunder、mpv
+各自打成独立运行时 APK（`com.fongmi.runtime.*`），主 APK 从 catalog 下载、
+安装后用 `DexClassLoader` + `System.load` 加载。它的 Python 运行时 APK
+arm64 约 39 MB，按需下载；`tvbus` 的 Go `.so` 也是播放时按配置 URL 下载，
+AAR 里只有 Java 包装。
+
+如果以后要再把 Python 或 fvp/mpv 这类大运行时移出主包，照这个方向做：
+主 APK 只保留 Java/接口与下载/安装器，运行时 APK 用同签名、独立
+versionCode，并校验 ABI、SHA-256 与签名。
+
+## 支持库与更新下载线路
+
+GitHub 资产统一走 `https://gh-proxy.com/`（`ghProxyUrl` / `ghProxyCandidates`），
+直连只作最后兜底；非 GitHub 镜像（华为云 / 清华 / PyPI / Maven）保持原样。
+覆盖 MPV 整合包、JRE / dex2jar、沉浸标题字体、GitHub API 更新检查与更新包下载。
+
+Yaozhi MPV：设置项初始化时静默请求 latest release，只有已安装且远端数字版本更高
+时才显示「更新」按钮；不弹窗、不强制、不在启动时提醒。更新先下载/解压到
+`mpv-yaozhi.new`，全部成功后才替换旧目录，失败保留旧版本。
 
 ## Windows 发布包的 VC++ 运行库
 

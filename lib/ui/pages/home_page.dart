@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
 import '../../app.dart';
@@ -538,6 +539,17 @@ class _HomePageState extends State<HomePage> {
             final extent = (gridWidth - gridSpacing * (columns - 1)) / columns;
             maxExtent = extent.clamp(120.0, 320.0);
             mainExtent = maxExtent * 292 / 188;
+          }
+        } else if (!kIsWeb &&
+            defaultTargetPlatform == TargetPlatform.android &&
+            MediaQuery.orientationOf(context) == Orientation.portrait) {
+          // 安卓手机竖屏：自动模式下至少排 3 个封面，避免一行只有两张、
+          // 封面巨大且首屏只能看到两三部片。
+          final gridWidth = maxContent - gridPadding * 2;
+          if (gridWidth > 0) {
+            final extent = (gridWidth - gridSpacing * 2) / 3;
+            maxExtent = extent.clamp(96.0, 188.0);
+            mainExtent = maxExtent * 1.5 + 44;
           }
         }
         final gridDelegate = SliverGridDelegateWithMaxCrossAxisExtent(

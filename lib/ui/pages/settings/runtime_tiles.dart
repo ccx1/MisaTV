@@ -11,6 +11,8 @@ class _MpvExtensionTileState extends State<_MpvExtensionTile> {
   bool _loading = true;
   bool _installed = false;
   bool _busy = false;
+  bool _checkingUpdate = false;
+  bool _hasUpdate = false;
   String? _error;
   MpvProgress? _progress;
   Map<String, String> _meta = const {};
@@ -30,6 +32,25 @@ class _MpvExtensionTileState extends State<_MpvExtensionTile> {
       _meta = meta;
       _loading = false;
     });
+    // 只在设置项可见时静默检查，不弹窗、不强制更新。
+    unawaited(_checkUpdate());
+  }
+
+  Future<void> _checkUpdate() async {
+    if (_checkingUpdate ||
+        !_installed ||
+        BundledRuntime.available('mpv-yaozhi')) {
+      return;
+    }
+    _checkingUpdate = true;
+    try {
+      final has = await MpvExtension.instance.hasUpdate;
+      if (mounted) setState(() => _hasUpdate = has);
+    } catch (_) {
+      // 检查失败就当没有更新，不打扰用户
+    } finally {
+      _checkingUpdate = false;
+    }
   }
 
   Future<void> _install() async {
@@ -46,6 +67,7 @@ class _MpvExtensionTileState extends State<_MpvExtensionTile> {
       );
       await _refresh();
       if (!mounted) return;
+      setState(() => _hasUpdate = false);
       ScaffoldMessenger.of(context)
           .showSnackBar(const SnackBar(content: Text('Yaozhi MPV 扩展安装完成')));
     } catch (e) {
@@ -81,6 +103,7 @@ class _MpvExtensionTileState extends State<_MpvExtensionTile> {
     try {
       await MpvExtension.instance.remove();
       await _refresh();
+      if (mounted) setState(() => _hasUpdate = false);
     } catch (e) {
       if (mounted) setState(() => _error = '$e');
     } finally {
@@ -182,7 +205,14 @@ class _MpvExtensionTileState extends State<_MpvExtensionTile> {
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
             else if (_installed && !BundledRuntime.available('mpv-yaozhi'))
-              TextButton(onPressed: _remove, child: const Text('删除'))
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (_hasUpdate)
+                    TextButton(onPressed: _install, child: const Text('更新')),
+                  TextButton(onPressed: _remove, child: const Text('删除')),
+                ],
+              )
             else if (!_installed)
               FilledButton.tonal(onPressed: _install, child: const Text('下载')),
           ],
@@ -728,7 +758,7 @@ class _PythonRuntimeTileState extends State<_PythonRuntimeTile> {
   }
 
   Future<void> startInstall() async {
-    if (_busy || _installed) return;
+    if (_builtIn || _busy || _installed) return;
     await _install();
   }
 
@@ -784,9 +814,13 @@ class _PythonRuntimeTileState extends State<_PythonRuntimeTile> {
     }
   }
 
+  /// Android 的 CPython 随 APK 内置，没有下载 / 删除动作。
+  bool get _builtIn => defaultTargetPlatform == TargetPlatform.android;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final bundled = BundledRuntime.available('python/${PyRuntime.version}');
     final progress = PyRuntime.instance.progress.value;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -838,17 +872,13 @@ class _PythonRuntimeTileState extends State<_PythonRuntimeTile> {
                         child: Text(
                           _loading
                               ? '检查中'
-                              : (_installed
-                                    ? (BundledRuntime.available(
-                                            'python/${PyRuntime.version}',
-                                          )
-                                          ? '已内置'
-                                          : '已安装')
-                                    : '未安装'),
+                              : _builtIn || (_installed && bundled)
+                              ? '已内置'
+                              : (_installed ? '已安装' : '未安装'),
                           style: TextStyle(
                             fontSize: 9,
                             fontWeight: FontWeight.w700,
-                            color: _installed
+                            color: _installed || _builtIn
                                 ? theme.colorScheme.primary
                                 : theme.disabledColor,
                           ),
@@ -858,7 +888,9 @@ class _PythonRuntimeTileState extends State<_PythonRuntimeTile> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    _installed
+                    _builtIn
+                        ? '随 APK 内置（Python 3.12 + requests/lxml），PY 蜘蛛源可直接运行'
+                        : _installed
                         ? 'PY 蜘蛛源可运行（Python 3.11 + requests/lxml）'
                         : '运行时缺失，可下载修复（Python 3.11 与依赖库，约 20 MB）',
                     style: theme.textTheme.labelSmall?.copyWith(
@@ -878,10 +910,9 @@ class _PythonRuntimeTileState extends State<_PythonRuntimeTile> {
                 height: 22,
                 child: CircularProgressIndicator(strokeWidth: 2),
               )
-            else if (_installed &&
-                !BundledRuntime.available('python/${PyRuntime.version}'))
+            else if (!_builtIn && _installed && !bundled)
               TextButton(onPressed: _remove, child: const Text('删除'))
-            else if (!_installed)
+            else if (!_builtIn && !_installed)
               FilledButton.tonal(onPressed: _install, child: const Text('下载')),
           ],
         ),

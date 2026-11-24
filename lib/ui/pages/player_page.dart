@@ -207,6 +207,10 @@ class _PlayerPageState extends State<PlayerPage>
   /// 运行时识别出的直播流：隐藏进度条 / 弹幕 / 片头片尾，底部显示「直播」。
   bool _live = false;
 
+  /// 手机全屏横向滑动进度：拖动起点与拖动中的目标位置（null = 未在拖动）。
+  Duration? _seekDragTarget;
+  Duration _seekDragBase = Duration.zero;
+
   /// 进度条右键单击 / 双击判定：双击清除记录，单击取点。
   /// 单击要等过双击窗口才执行，否则第二次按下时第一次的设置已经落盘，撤不回来。
   Timer? _skipTapTimer;
@@ -1985,6 +1989,101 @@ class _PlayerPageState extends State<PlayerPage>
     controller.seekTo(safe);
   }
 
+  /// 手机全屏横向滑动：按屏幕宽度映射成进度，松手才真正 seek。
+  ///
+  /// 手指在画面任意位置左右滑都能用，符合安卓播放器的操作习惯；
+  /// 拖动过程中只更新预览 HUD，避免每一帧都向内核发 seek。
+  void _onSeekDragStart(DragStartDetails details) {
+    if (!_isMobile || _live) return;
+    if (_duration <= Duration.zero) return;
+    _seekDragBase = _position;
+    setState(() => _seekDragTarget = _position);
+  }
+
+  void _onSeekDragUpdate(DragUpdateDetails details) {
+    final target = _seekDragTarget;
+    if (target == null) return;
+    final totalMs = _duration.inMilliseconds;
+    if (totalMs <= 0) return;
+    final width = MediaQuery.sizeOf(context).width;
+    if (width <= 0) return;
+    final deltaMs =
+        (details.primaryDelta ?? 0) / width * totalMs;
+    var next = target + Duration(milliseconds: deltaMs.round());
+    if (next < Duration.zero) next = Duration.zero;
+    if (next > _duration) next = _duration;
+    setState(() => _seekDragTarget = next);
+  }
+
+  void _onSeekDragEnd(DragEndDetails details) {
+    final target = _seekDragTarget;
+    if (target == null) return;
+    setState(() => _seekDragTarget = null);
+    _seekTo(target);
+  }
+
+  void _onSeekDragCancel() {
+    if (_seekDragTarget == null) return;
+    setState(() => _seekDragTarget = null);
+  }
+
+  /// 横向滑动进度的预览浮层：目标时间 + 相对起点的快进 / 快退量。
+  Widget _seekDragHud() {
+    final target = _seekDragTarget;
+    if (target == null) return const SizedBox.shrink();
+    final theme = Theme.of(context);
+    final diff = target - _seekDragBase;
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Center(
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 14),
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.74),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      diff.isNegative
+                          ? Icons.fast_rewind_rounded
+                          : Icons.fast_forward_rounded,
+                      color: theme.colorScheme.primary,
+                      size: 22,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      '${_fmt(target)} / ${_fmt(_duration)}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        fontFeatures: [FontFeature.tabularFigures()],
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  '${diff.isNegative ? '-' : '+'}${_fmt(diff.abs())}',
+                  style: TextStyle(
+                    color: Colors.white.withValues(alpha: 0.72),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   IconData get _volumeIcon {
     if (_volume <= 0.001) return Icons.volume_off_rounded;
     if (_volume < 0.5) return Icons.volume_down_rounded;
@@ -2182,17 +2281,40 @@ class _PlayerPageState extends State<PlayerPage>
         (defaultTargetPlatform == TargetPlatform.windows ||
             defaultTargetPlatform == TargetPlatform.linux ||
             defaultTargetPlatform == TargetPlatform.macOS);
+    // 沉浸观影模式下回到外壳仍要保持全屏，不能把系统栏放出来。
+    final keepImmersive =
+        _immersiveMode &&
+        !kIsWeb &&
+        defaultTargetPlatform == TargetPlatform.android;
     if (_fullscreen && isDesktop && !_immersiveMode) {
       setWindowFullscreen(false);
     } else if (_fullscreen && !isDesktop) {
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      SystemChrome.setEnabledSystemUIMode(
+        keepImmersive ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+      );
     } else if (_landscapeUiApplied && !isDesktop) {
       // 自动横屏隐藏了系统栏，离开播放器恢复（与全屏恢复一致）。
-      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      SystemChrome.setEnabledSystemUIMode(
+        keepImmersive ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+      );
     }
     // 移动端自动横屏：离开播放器时恢复系统默认方向。
+    // 沉浸观影模式下保持横屏，否则回到大屏外壳会立刻竖屏闪一下。
     if (_opened && _isMobile) {
-      unawaited(SystemChrome.setPreferredOrientations(<DeviceOrientation>[]));
+      if (_immersiveMode &&
+          !kIsWeb &&
+          defaultTargetPlatform == TargetPlatform.android) {
+        unawaited(
+          SystemChrome.setPreferredOrientations(const <DeviceOrientation>[
+            DeviceOrientation.landscapeLeft,
+            DeviceOrientation.landscapeRight,
+          ]),
+        );
+      } else {
+        unawaited(
+          SystemChrome.setPreferredOrientations(const <DeviceOrientation>[]),
+        );
+      }
     }
     super.dispose();
   }
@@ -2793,6 +2915,11 @@ class _PlayerPageState extends State<PlayerPage>
                 behavior: HitTestBehavior.opaque,
                 onTap: _toggleControls,
                 onDoubleTap: () => unawaited(_toggleFullscreen()),
+                // 手机：画面任意位置左右滑动 = 拖动进度（松手后 seek）。
+                onHorizontalDragStart: _isMobile ? _onSeekDragStart : null,
+                onHorizontalDragUpdate: _isMobile ? _onSeekDragUpdate : null,
+                onHorizontalDragEnd: _isMobile ? _onSeekDragEnd : null,
+                onHorizontalDragCancel: _isMobile ? _onSeekDragCancel : null,
                 onLongPressStart: (_) => _startHoldRate(),
                 onLongPressEnd: (_) => _endHoldRate(),
                 onLongPressCancel: _endHoldRate,
@@ -2938,6 +3065,7 @@ class _PlayerPageState extends State<PlayerPage>
                         ),
                       ),
                     ),
+                    _seekDragHud(),
                     if (_detailsVisible && !_mini) _detailsOverlay(context),
                   ],
                 ),

@@ -177,9 +177,35 @@ class ProxyRuntime {
         h == '0.0.0.0';
   }
 
+  /// 局域网 / 私有地址：不应丢进远程代理。
+  ///
+  /// WebDAV（NAS / OpenList）、DLNA、Emby 这类目标通常只在局域网可达；
+  /// 用户开启 Clash 的系统代理后，把 192.168.x.x 也发给代理会直接超时，
+  /// 表现就是「同步/媒体库连不上」。这里统一按私有网段直连。
+  static bool isPrivateHost(String host) {
+    final h = host.trim().toLowerCase();
+    if (isLocalHost(h)) return true;
+    if (h.endsWith('.local') || h.endsWith('.lan') || h.endsWith('.home.arpa')) {
+      return true;
+    }
+    // 单段主机名（nas / router）：只可能来自本机 hosts 或局域网 mDNS。
+    if (!h.contains('.')) return true;
+    final match = RegExp(
+      r'^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$',
+    ).firstMatch(h);
+    if (match == null) return false;
+    final a = int.parse(match.group(1)!);
+    final b = int.parse(match.group(2)!);
+    return a == 10 ||
+        a == 127 ||
+        (a == 192 && b == 168) ||
+        (a == 172 && b >= 16 && b <= 31) ||
+        (a == 169 && b == 254);
+  }
+
   /// 给 `HttpClient.findProxy` 的返回值。
   String proxyFor(Uri uri) {
-    if (!enabled || isLocalHost(uri.host)) return 'DIRECT';
+    if (!enabled || isPrivateHost(uri.host)) return 'DIRECT';
     return 'PROXY 127.0.0.1:$bridgePort';
   }
 
