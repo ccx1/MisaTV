@@ -118,12 +118,14 @@ flutter build windows --release
 - 产物目录为 `build/windows/x64/runner/Release/`。必须分发整个运行目录，包括 `data/`、插件 DLL、`runtimes/ready.json` 及四个组件，不能只交付 EXE。
 - EXE 同目录必须含 `msvcp140.dll`、`vcruntime140.dll`、`vcruntime140_1.dll`，使用项目构建流程提供的版本，不从 JRE 随便取旧 DLL。
 - **压缩包排除所有 `userdata/`**，并检查 ZIP 条目，防止订阅、历史、登录态和缓存泄漏。运行时必须从专用准备目录取得，不从用户数据目录整体复制。
-- CI 发布资产名称为 `MisaTV-windows-x64.zip`；本地版本化交付可放入 `build/packages/MisaTV-<version>-windows-x64-bundled.zip`。报告实际文件路径、大小、验证结果，交付压缩包时附 SHA-256。
+- 完整包的 CI 发布资产名称为 `MisaTV-windows-x64.zip`。本地版本化交付可放入 `build/packages/MisaTV-<version>-windows-x64-bundled.zip`。报告实际文件路径、大小、验证结果，交付压缩包时附 SHA-256。
 - `assets/windows-runtimes/`、下载缓存、SDK、构建目录和发布压缩包不入库。`assets/aria2/aria2c.exe` 与私有壳载荷也不应强行加入 Git。仓库已跟踪的本项目自建 shim JAR 按其构建流程维护。
 - Fork 的应用与发布版本采用 `X.Y.Z.R`。前三段是所基于的官方版本，第四段从 `1` 开始，同一官方版本内逐次递增。基于官方 `1.2.0` 时依次用 `1.2.0.1`、`1.2.0.2`。跟进官方 `1.3.0` 后从 `1.3.0.1` 开始。
 - `lib/core/app_version.dart` 的 `kAppVersion` 记录完整四段版本，GitHub Release 和标签使用 `vX.Y.Z.R`。Flutter 的 `pubspec.yaml` 保持 `X.Y.Z+N` 格式，前三段与应用版本一致，平台构建编号 `N` 随每次新发布递增。
 - 校验应用版本与 Flutter 版本的一致性。普通修复或文档任务不自动升级版本。
-- 提交仅暂存本次任务相关文件；不要用 `git add .` 把其他任务或用户文件一并带入。不在未获授权时推送、打标签、发布 Release 或上传外部平台。
+- 提交时仅暂存本次任务相关文件，保留其他未提交改动。
+- 用户要求提交并推送时，每次都要构建本次提交对应的 Release 版本。需要发布时按四段版本规则递增应用版本和 Flutter 构建编号，推送到本项目 fork 的 `main`，跟进 **Build and publish Release** 完成并核验发布资产与 SHA-256。
+- 仅提交的任务按用户授权范围处理推送、标签和发布。
 
 Android / macOS 构建分别参考 [.github/workflows/build-android.yml](.github/workflows/build-android.yml) 和 [.github/workflows/build-macos.yml](.github/workflows/build-macos.yml)。Android 使用 ART / DexClassLoader，不能套用 Windows JRE 安装逻辑；macOS 的 `.app` 打包需保留权限与符号链接。Windows 构建和打包检查见 [.github/workflows/build.yml](.github/workflows/build.yml)。
 
