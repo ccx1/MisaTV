@@ -126,7 +126,8 @@ flutter build windows --release
 - `lib/core/app_version.dart` 的 `kAppVersion` 记录完整四段版本，GitHub Release 和标签使用 `vX.Y.Z.R`。Flutter 的 `pubspec.yaml` 保持 `X.Y.Z+N` 格式，前三段与应用版本一致，平台构建编号 `N` 随每次新发布递增。
 - 校验应用版本与 Flutter 版本的一致性。普通修复或文档任务不自动升级版本。
 - 新任务从目标分支创建 `feature/ccx_yyyyMMdd_<改动缩写>` 分支。日期使用创建当天的八位年月日，末尾使用能识别本次改动的简短缩写，例如 `feature/ccx_20261124_sync130`。已有任务沿用其分支。
-- 提交时仅暂存本次任务相关文件。推送只推任务分支，由用户创建和合并 Pull Request。每次提交并推送都要对任务分支的提交构建 Release 产物，可使用本地构建或在 GitHub Actions 手动运行 Windows 构建工作流。
+- 提交时仅暂存本次任务相关文件。推送只推任务分支，由用户创建和合并 Pull Request。任务分支的 Release 构建和验证在本地执行。
+- GitHub Actions 的唯一触发入口是 fork 的 `main` 分支收到提交。`release.yml` 通过 `workflow_call` 调用各平台构建。
 - 正式版本随 Pull Request 合入 fork 的 `main` 后发布。发布 PR 需递增应用版本和 Flutter 构建编号，并随提交提供 `docs/releases/vX.Y.Z.R.md`。用中文写清相对上一个正式版本的用户可见变化、修复和适用平台，必要时说明升级方式或兼容性变化。
 - **Build and publish Release** 读取对应版本的 Markdown 作为 GitHub Release 正文。发布后核验正文、发布资产与 SHA-256。
 

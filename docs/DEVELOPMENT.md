@@ -269,7 +269,7 @@ jar 系蜘蛛**不读 `ext` 里的网盘凭据**，必须由应用主动落盘�
 
 ### GitHub 自动发布
 
-发布 Pull Request 合入 fork 的 `main` 后运行 **Build and publish Release**，也可在 GitHub Actions 对 `main` 手动运行。
+Pull Request 合入 fork 的 `main` 后，`main` 的 `push` 事件触发 **Build and publish Release**。各平台构建由该工作流调用，任务分支在本地验证。
 发布版本取自 `lib/core/app_version.dart` 的 `kAppVersion`，格式为 `X.Y.Z.R`。
 `X.Y.Z` 是所基于的官方版本。首次发布从 `R = 1` 开始，同一官方版本内递增第四段。
 例如基于官方 `1.2.0` 依次发布 `v1.2.0.1`、`v1.2.0.2`，跟进官方 `1.3.0` 后从 `v1.3.0.1` 开始。
@@ -282,7 +282,7 @@ Release 提供 Windows x64 完整包、标准包、轻量包、Android arm64 APK
 `SHA256SUMS.txt`。发布任务下载上一个正式版本中同包型的 Windows ZIP，按文件 SHA-256 生成
 `MisaTV-delta-x64-<full|standard|lite>-<旧标签>-to-<新标签>.zip`，包含新增和变更文件以及删除清单，
 并把差异包一并纳入校验列表。没有对应基线的包型首次只发布整包。跨过基线版本的客户端走整包下载。
-同一版本后续推送运行 Windows 检查及构建，产物可从 Actions 下载，已发布的版本及资产保持原样。
+同一版本的后续改动合入 `main` 后会生成 Windows 构建产物，可从 Actions 下载。
 
 标准包以 `runtimes/standard` 标记包型，裁剪版 JRE 的工作副本放在 `userdata/jvm-standard/`。
 完整包与轻量包继续使用原有的包型判断和工作目录。

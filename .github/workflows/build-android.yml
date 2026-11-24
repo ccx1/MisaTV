@@ -2,7 +2,6 @@ name: Build Android APK
 
 on:
   workflow_call:
-  workflow_dispatch:
     inputs:
       shell_jars:
         description: 'Restore optional assets/jvm/shell-real/*.jar from the SHELL_REAL_JARS_B64 secret (otherwise only jars committed to the repo are used)'

@@ -1,13 +1,7 @@
 name: build
 
 on:
-  # main 的提交由 release.yml 调用本工作流。
-  push:
-    branches: [mod]
-  pull_request:
-    branches: [mod, main]
   workflow_call:
-  workflow_dispatch:
 
 permissions:
   contents: read
