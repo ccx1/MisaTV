@@ -10,6 +10,8 @@ void main() {
       expect(settings.bufferTuned, isFalse);
       expect(settings.streamCache, isFalse);
       expect(settings.streamCacheMb, 1024);
+      expect(settings.bufferByEpisode, isFalse);
+      expect(settings.prefetchNextEpisodes, 0);
     });
 
     test('没调过缓冲的旧配置升级到新默认值，调过的保持原样', () {
@@ -38,6 +40,8 @@ void main() {
         bufferTuned: true,
         streamCache: true,
         streamCacheMb: 2048,
+        bufferByEpisode: true,
+        prefetchNextEpisodes: 3,
       );
       final restored = PlayerSettings.fromJson(settings.toJson());
       expect(restored.bufferMinSec, 2.5);
@@ -45,6 +49,8 @@ void main() {
       expect(restored.bufferTuned, isTrue);
       expect(restored.streamCache, isTrue);
       expect(restored.streamCacheMb, 2048);
+      expect(restored.bufferByEpisode, isTrue);
+      expect(restored.prefetchNextEpisodes, 3);
     });
 
     test('越界 / 非法值收敛到合法区间，旧配置缺字段走默认', () {
@@ -53,11 +59,21 @@ void main() {
         'bufferMaxSec': 9999,
         'bufferTuned': true,
         'streamCacheMb': 1,
+        'prefetchNextEpisodes': 100,
       });
       expect(settings.bufferMinSec, 0.2);
       expect(settings.bufferMaxSec, 120.0);
       expect(settings.streamCacheMb, 128);
       expect(settings.streamCache, isFalse);
+      expect(settings.prefetchNextEpisodes, 3);
+      expect(
+        settings.copyWith(prefetchNextEpisodes: -5).prefetchNextEpisodes,
+        0,
+      );
+      expect(
+        settings.copyWith(bufferByEpisode: true).effectiveStreamCache,
+        isTrue,
+      );
     });
 
     test('copyWith 不传时保留已有缓冲设置', () {

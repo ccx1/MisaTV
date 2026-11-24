@@ -2091,9 +2091,52 @@ Future<void> _editBufferSettings(BuildContext context, AppState app) async {
   if (context.mounted) _settingsSnack(context, '播放缓冲已更新，当前播放已应用');
 }
 
+Future<void> _pickBufferMode(BuildContext context, AppState app) async {
+  final picked = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => SimpleDialog(
+      title: const Text('缓冲模式'),
+      children: [
+        SimpleDialogOption(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          child: const Text('固定时长'),
+        ),
+        SimpleDialogOption(
+          onPressed: () => Navigator.of(ctx).pop(true),
+          child: const Text('按集缓冲'),
+        ),
+      ],
+    ),
+  );
+  if (picked == null) return;
+  await app.setPlayerSettings(
+    app.playerSettings.copyWith(bufferByEpisode: picked),
+  );
+}
+
+Future<void> _pickPrefetchEpisodes(BuildContext context, AppState app) async {
+  final picked = await showDialog<int>(
+    context: context,
+    builder: (ctx) => SimpleDialog(
+      title: const Text('预取后续集数'),
+      children: [
+        for (final count in [0, 1, 2, 3])
+          SimpleDialogOption(
+            onPressed: () => Navigator.of(ctx).pop(count),
+            child: Text(count == 0 ? '仅当前集' : '后续 $count 集'),
+          ),
+      ],
+    ),
+  );
+  if (picked == null) return;
+  await app.setPlayerSettings(
+    app.playerSettings.copyWith(prefetchNextEpisodes: picked),
+  );
+}
+
 /// 缓存容量上限：给固定档位，避免手填出离谱的值。
 Future<void> _pickStreamCacheSize(BuildContext context, AppState app) async {
-  const options = [256, 512, 1024, 2048, 4096, 8192];
+  const options = [256, 512, 1024, 2048, 4096, 8192, 16384];
   final current = app.playerSettings.streamCacheMb;
   final picked = await showDialog<int>(
     context: context,

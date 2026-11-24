@@ -31,13 +31,15 @@ class StreamDiskCache {
   static const int maxEntryBytes = 64 * 1024 * 1024;
 
   /// 开启磁盘缓存时，每次最多从上游读取 8MB，避免开放 Range 下载整部影片。
+  static const rangeChunkBytes = 8 * 1024 * 1024;
+
   static String limitRange(String range) {
     final match = RegExp(r'^bytes=(\d+)-(\d*)$').firstMatch(range.trim());
     if (match == null) return range;
     final start = int.tryParse(match[1]!);
     if (start == null) return range;
     final end = int.tryParse(match[2]!);
-    final limit = start + 8 * 1024 * 1024 - 1;
+    final limit = start + rangeChunkBytes - 1;
     if (end != null && end < start) return range;
     return 'bytes=$start-${end == null || end > limit ? limit : end}';
   }
@@ -54,6 +56,10 @@ class StreamDiskCache {
   /// 已经确认存在的分片目录，避免每个分片都 create 一次。
   final Set<String> _readyDirs = {};
   final Set<String> _writing = {};
+  // 暂停的播放器可能一直持有一个未写完的区间。预取可用自己的临时文件补齐。
+  final Set<String> _prefetchWriting = {};
+  final Set<Set<String>> _prefetched = {};
+  int _inFlightBytes = 0;
   int _generation = 0;
 
   int _bytes = 0;
@@ -188,7 +194,11 @@ class StreamDiskCache {
   }
 
   /// 仅在缓存完整覆盖请求区间时命中，不能把未下载的空洞当作视频数据。
-  Future<StreamCacheEntry?> lookupRange(String key, String range) async {
+  Future<StreamCacheEntry?> lookupRange(
+    String key,
+    String range, {
+    bool allowPrefix = false,
+  }) async {
     if (dir.isEmpty || !enabled()) return null;
     final match = RegExp(r'^bytes=(\d*)-(\d*)$').firstMatch(range.trim());
     if (match == null || (match[1]!.isEmpty && match[2]!.isEmpty)) return null;
@@ -207,7 +217,14 @@ class StreamDiskCache {
     } on FileSystemException {
       // 还没有该视频的分片目录。
     }
+    StreamCacheEntry? prefix;
     for (final (entryKey, span) in candidates) {
+      final requestedStart = int.tryParse(match[1]!);
+      if (span != null &&
+          requestedStart != null &&
+          (requestedStart < span.start || requestedStart > span.end)) {
+        continue;
+      }
       final cached = await lookup(entryKey);
       if (cached == null) continue;
       if (span != null && span.length != cached.length) continue;
@@ -221,21 +238,28 @@ class StreamDiskCache {
       if (start == null) return null;
       final requestedEnd = suffix ? total - 1 : (tail ?? total - 1);
       final end = requestedEnd.clamp(0, total - 1);
-      if (start > end ||
-          start < (span?.start ?? 0) ||
-          end > (span?.end ?? total - 1)) {
+      final availableEnd = span?.end ?? total - 1;
+      if (start > end || start < (span?.start ?? 0) || start > availableEnd) {
         continue;
       }
-      return StreamCacheEntry(
+      if (end > availableEnd && !allowPrefix) continue;
+      final servedEnd = end.clamp(0, availableEnd);
+      final hit = StreamCacheEntry(
         file: cached.file,
         contentType: cached.contentType,
-        length: end - start + 1,
+        length: servedEnd - start + 1,
         offset: start - (span?.start ?? 0),
-        contentRange: 'bytes $start-$end/$total',
+        contentRange: 'bytes $start-$servedEnd/$total',
       );
+      if (servedEnd == end) return hit;
+      if (prefix == null || hit.length > prefix.length) prefix = hit;
     }
-    return null;
+    return prefix;
   }
+
+  void protectPrefetch(Set<String> entries) => _prefetched.add(entries);
+
+  void unprotectPrefetch(Set<String> entries) => _prefetched.remove(entries);
 
   /// 未命中时开一个写入口；返回 null 表示这次响应不进缓存。
   Future<StreamCacheWriter?> open(
@@ -243,6 +267,7 @@ class StreamDiskCache {
     required String contentType,
     required int length,
     StreamCacheRange? range,
+    bool prefetch = false,
   }) async {
     if (dir.isEmpty || !enabled()) return null;
     if (length <= 0 || length > maxEntryBytes) return null;
@@ -251,15 +276,26 @@ class StreamDiskCache {
       if (!range.valid || range.length != length) return null;
       key = '${key}_${range.start}_${range.end}_${range.total}';
     }
-    if (!_writing.add(key)) return null;
+    if (prefetch) {
+      await _ensureIndex();
+      if (!enabled()) return null;
+    }
+    final writing = prefetch ? _prefetchWriting : _writing;
+    if (!writing.add(key)) return null;
     if (_indexed) {
       // 索引已就绪：淘汰只动内存记账，文件删除异步进行，不占取流路径。
-      _evictFor(length);
+      _evictFor(_inFlightBytes + length);
+      if (_prefetched.isNotEmpty &&
+          _bytes + _inFlightBytes + length > limitMb() * 1024 * 1024) {
+        writing.remove(key);
+        return null;
+      }
     } else {
       // 首次启用 / 刚启动：后台补索引，本次分片先照常落盘。
       // 若在这里 await 整目录扫描，首片会被拖住几百毫秒到数秒。
       unawaited(_ensureIndex());
     }
+    _inFlightBytes += length;
     final entry = _entry(key);
     try {
       final parent = entry.parent;
@@ -272,6 +308,7 @@ class StreamDiskCache {
         '${entry.path}.${pid}_${DateTime.now().microsecondsSinceEpoch}.tmp',
       ).create(exclusive: true);
       return StreamCacheWriter._(
+        writing,
         cache: this,
         key: key,
         entry: entry,
@@ -282,7 +319,8 @@ class StreamDiskCache {
         generation: _generation,
       );
     } catch (_) {
-      _writing.remove(key);
+      writing.remove(key);
+      _inFlightBytes -= length;
       _readyDirs.remove(entry.parent.path);
       return null;
     }
@@ -304,6 +342,7 @@ class StreamDiskCache {
       });
     for (final path in paths) {
       if (_bytes + incoming <= limit) break;
+      if (_prefetched.any((entries) => entries.contains(path))) continue;
       _drop(path);
     }
   }
@@ -419,7 +458,7 @@ class StreamCacheRange {
 /// 写入器：一边转发给播放器，一边把同样的字节写进 `<key>.tmp`，
 /// 流正常结束后 rename 成正式条目并记录 content-type。
 class StreamCacheWriter {
-  StreamCacheWriter._({
+  StreamCacheWriter._(this._writing, {
     required this.cache,
     required this.key,
     required this.entry,
@@ -447,6 +486,7 @@ class StreamCacheWriter {
   final IOSink sink;
   final int expectedLength;
   final int generation;
+  final Set<String> _writing;
   bool _done = false;
   bool _failed = false;
   int _written = 0;
@@ -461,8 +501,8 @@ class StreamCacheWriter {
     }
   }
 
-  Future<void> commit() async {
-    if (_done) return;
+  Future<bool> commit() async {
+    if (_done) return false;
     _done = true;
     try {
       await sink.close();
@@ -471,12 +511,17 @@ class StreamCacheWriter {
           generation != cache._generation ||
           !cache.enabled()) {
         await abort();
-        return;
+        return false;
       }
-      if (await entry.exists()) {
-        try {
-          await entry.delete();
-        } catch (_) {}
+      final existing = await entry.stat();
+      if (generation != cache._generation || !cache.enabled()) {
+        await abort();
+        return false;
+      }
+      if (existing.type == FileSystemEntityType.file &&
+          existing.size == expectedLength) {
+        await abort();
+        return true;
       }
       await tmp.rename(entry.path);
       try {
@@ -485,21 +530,32 @@ class StreamCacheWriter {
       } catch (_) {}
       cache._put(entry.path, _written, contentType);
       cache._evictFor(0);
+      return true;
     } catch (_) {
       await abort();
+      return false;
     } finally {
-      cache._writing.remove(key);
+      _release();
     }
   }
 
   Future<void> abort() async {
     _done = true;
-    cache._writing.remove(key);
     try {
       await sink.close();
     } catch (_) {}
     try {
       if (await tmp.exists()) await tmp.delete();
     } catch (_) {}
+    _release();
+  }
+
+  bool _released = false;
+
+  void _release() {
+    if (_released) return;
+    _released = true;
+    _writing.remove(key);
+    cache._inFlightBytes -= expectedLength;
   }
 }

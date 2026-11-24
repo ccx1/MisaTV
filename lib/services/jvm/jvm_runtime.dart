@@ -47,10 +47,12 @@ class JvmRuntime {
   /// 安卓端不需要下载 JVM 运行时：`jar_spider_android.dart` +
   /// `SpiderHostPlugin.kt` 用 ART / DexClassLoader 直接加载 DEX，原生等价于
   /// 桌面端的「JRE 17 + dex2jar」。只有桌面端才要求 JRE + dex2jar 已安装。
+  /// 随包 JVM 可离线准备，允许先展示 JAR 源；实际调用会等待 installed()。
   static Future<bool> jarSpiderReady({bool refresh = false}) async {
     if (kIsWeb) return false;
     if (Platform.isAndroid) return true;
-    return instance.installed(refresh: refresh);
+    return BundledRuntime.available('jvm/$version') ||
+        await instance.installed(refresh: refresh);
   }
 
   /// JRE 压缩包；解压后取「含 bin/java.exe」的那层目录。

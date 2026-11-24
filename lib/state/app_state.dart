@@ -2762,7 +2762,7 @@ class AppState extends ChangeNotifier {
           play,
           provider,
           purify: playerSettings.m3u8Purify,
-          cache: playerSettings.streamCache,
+          cache: playerSettings.effectiveStreamCache,
         );
     if (!needsRelay) return play;
     final wrapped = relay.playUrl(

@@ -31,6 +31,7 @@ class HlsSegment {
     this.keyUri,
     this.ivHex,
     this.range,
+    this.durationSeconds = 0,
   });
 
   final String url;
@@ -40,6 +41,7 @@ class HlsSegment {
   final String? keyUri;
   final String? ivHex;
   final HlsByteRange? range;
+  final double durationSeconds;
 }
 
 class HlsPlaylist {
@@ -90,10 +92,17 @@ HlsPlaylist parseHlsMediaPlaylist(String text, String base) {
   String? ivHex;
   String? initUri;
   HlsByteRange? pendingRange;
+  var durationSeconds = 0.0;
   var nextRangeOffset = 0;
   for (final raw in text.replaceAll('\r\n', '\n').split('\n')) {
     final line = raw.trim();
     if (line.isEmpty) continue;
+    if (line.startsWith('#EXTINF:')) {
+      final seconds = double.tryParse(line.substring(8).split(',').first);
+      durationSeconds =
+          seconds != null && seconds.isFinite && seconds > 0 ? seconds : 0;
+      continue;
+    }
     if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
       sequence =
           int.tryParse(line.substring(line.indexOf(':') + 1).trim()) ??
@@ -139,8 +148,10 @@ HlsPlaylist parseHlsMediaPlaylist(String text, String base) {
         keyUri: keyUri,
         ivHex: ivHex,
         range: pendingRange,
+        durationSeconds: durationSeconds,
       ),
     );
+    durationSeconds = 0;
     if (pendingRange != null) {
       nextRangeOffset = pendingRange.offset + pendingRange.length;
       pendingRange = null;
