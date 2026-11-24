@@ -13,11 +13,15 @@ Future<void> showUpdateDialog(
   BuildContext context,
   AppRelease release, {
   bool fallbackToFull = false,
+  bool installFailed = false,
 }) {
   return showDialog<void>(
     context: context,
-    builder: (ctx) =>
-        UpdateDialog(release: release, fallbackToFull: fallbackToFull),
+    builder: (ctx) => UpdateDialog(
+      release: release,
+      fallbackToFull: fallbackToFull,
+      installFailed: installFailed,
+    ),
   );
 }
 
@@ -26,10 +30,12 @@ class UpdateDialog extends StatefulWidget {
     super.key,
     required this.release,
     this.fallbackToFull = false,
+    this.installFailed = false,
   });
 
   final AppRelease release;
   final bool fallbackToFull;
+  final bool installFailed;
 
   @override
   State<UpdateDialog> createState() => _UpdateDialogState();
@@ -37,6 +43,7 @@ class UpdateDialog extends StatefulWidget {
 
 class _UpdateDialogState extends State<UpdateDialog> {
   bool _downloading = false;
+  bool _installing = false;
   bool _cancelRequested = false;
   String? _downloadStatus;
   int _received = 0;
@@ -45,11 +52,14 @@ class _UpdateDialogState extends State<UpdateDialog> {
   String? _savedPath;
 
   AppRelease get _release => widget.release;
-  bool get _canDownload => _release.downloadUrl.trim().isNotEmpty;
+  bool get _canInstall => UpdateDownloader.canInstallWindows(_release);
+  bool get _canDownload =>
+      _canInstall || _release.downloadUrl.trim().isNotEmpty;
 
   @override
   void initState() {
     super.initState();
+    if (widget.installFailed) _error = '安装失败，已恢复旧版';
     if (widget.fallbackToFull) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _startDownload();
@@ -80,10 +90,11 @@ class _UpdateDialogState extends State<UpdateDialog> {
     }
     setState(() {
       _downloading = true;
+      _installing = false;
       _cancelRequested = false;
       _received = 0;
       _total = _release.assetSize;
-      _downloadStatus = widget.fallbackToFull ? '差异更新失败，正在下载完整包' : null;
+      _downloadStatus = null;
       _error = null;
       _savedPath = null;
     });
@@ -97,24 +108,22 @@ class _UpdateDialogState extends State<UpdateDialog> {
         });
       }
 
-      if (!widget.fallbackToFull) {
-        final scheduled = await UpdateDownloader.tryWindowsDelta(
+      if (_canInstall) {
+        await UpdateDownloader.installWindows(
           _release,
-          onProgress: (received, total) {
-            if (!mounted) return;
-            setState(() => _downloadStatus = '正在下载差异更新包');
-            onProgress(received, total);
+          skipDelta: widget.fallbackToFull || widget.installFailed,
+          onStatus: (status, installing) {
+            if (mounted) {
+              setState(() {
+                _downloadStatus = status;
+                _installing = installing;
+              });
+            }
           },
-          onPreparing: () {
-            if (mounted) setState(() => _downloadStatus = '正在校验差异更新，完成后将重启');
-          },
+          onProgress: onProgress,
           isCancelled: isCancelled,
         );
-        if (scheduled) return;
-        if (isCancelled()) throw const UpdateDownloadCancelled();
-        if (_downloadStatus != null) {
-          setState(() => _downloadStatus = '差异更新失败，正在下载完整包');
-        }
+        return;
       }
       onProgress(0, _release.assetSize);
       final path = await UpdateDownloader.download(
@@ -134,11 +143,11 @@ class _UpdateDialogState extends State<UpdateDialog> {
         _cancelRequested = false;
       });
     } catch (e) {
-      AppLog.w('update', '下载更新包失败：$e');
+      AppLog.w('update', '更新失败：$e');
       if (!mounted) return;
       setState(() {
         _downloading = false;
-        _error = '$e';
+        _error = e is StateError ? e.message : describeAppError(e).message;
       });
     }
   }
@@ -239,7 +248,7 @@ class _UpdateDialogState extends State<UpdateDialog> {
               Padding(
                 padding: const EdgeInsets.only(top: 12),
                 child: Text(
-                  '下载失败：${describeAppError(_error).message}\n'
+                  '$_error\n'
                   '可重试，或用「网盘下载」手动获取。',
                   style: theme.textTheme.bodySmall?.copyWith(
                     color: theme.colorScheme.error,
@@ -274,7 +283,9 @@ class _UpdateDialogState extends State<UpdateDialog> {
       actions: [
         if (_downloading)
           TextButton(
-            onPressed: () => setState(() => _cancelRequested = true),
+            onPressed: _installing
+                ? null
+                : () => setState(() => _cancelRequested = true),
             child: const Text('取消下载'),
           )
         else
@@ -295,13 +306,20 @@ class _UpdateDialogState extends State<UpdateDialog> {
             label: const Text('打开文件夹'),
           )
         else if (_downloading)
-          const FilledButton(onPressed: null, child: Text('下载中…'))
+          FilledButton(
+            onPressed: null,
+            child: Text(_installing ? '安装中…' : '下载中…'),
+          )
         else
           FilledButton.icon(
             onPressed: _startDownload,
             icon: const Icon(Icons.download_rounded, size: 18),
             label: Text(
-              !_canDownload ? '打开发布页' : (_error == null ? '下载' : '重试下载'),
+              !_canDownload
+                  ? '打开发布页'
+                  : _canInstall
+                  ? (_error == null ? '下载并安装' : '重试更新')
+                  : (_error == null ? '下载' : '重试下载'),
             ),
           ),
       ],

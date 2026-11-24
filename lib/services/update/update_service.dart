@@ -22,6 +22,7 @@ class AppRelease {
     this.assetDigest = '',
     this.publishedAt = '',
     this.windowsDeltas = const {},
+    this.windowsPackages = const {},
   });
 
   /// 去掉 `v` 前缀的版本号，例如 `0.9.1`。
@@ -39,6 +40,7 @@ class AppRelease {
   final String assetDigest;
   final String publishedAt;
   final Map<String, UpdateAsset> windowsDeltas;
+  final Map<String, UpdateAsset> windowsPackages;
 
   /// 实际要打开的下载地址。
   String get openUrl => downloadUrl.isNotEmpty ? downloadUrl : htmlUrl;
@@ -228,9 +230,9 @@ class UpdateService {
     ];
     final picked = pickAsset(assets);
     final deltas = <String, UpdateAsset>{};
+    final packages = <String, UpdateAsset>{};
     if (RegExp(r'^v\d+\.\d+\.\d+\.\d+$').hasMatch(tag)) {
-      for (final variant in ['full', 'lite']) {
-        final name = 'MisaTV-delta-x64-$variant-v$kAppVersion-to-$tag.zip';
+      UpdateAsset? trustedAsset(String name) {
         final url =
             'https://github.com/$kGithubRepo/releases/download/$tag/$name';
         for (final item in assets) {
@@ -240,9 +242,20 @@ class UpdateService {
           final asset = _parseAsset(item);
           if (asset.size > 0 &&
               RegExp(r'^sha256:[a-f0-9]{64}$').hasMatch(asset.digest)) {
-            deltas[variant] = asset;
+            return asset;
           }
         }
+        return null;
+      }
+
+      for (final variant in ['full', 'lite']) {
+        final delta = trustedAsset(
+          'MisaTV-delta-x64-$variant-v$kAppVersion-to-$tag.zip',
+        );
+        if (delta != null) deltas[variant] = delta;
+        final suffix = variant == 'lite' ? '-lite' : '';
+        final package = trustedAsset('MisaTV-windows-x64$suffix.zip');
+        if (package != null) packages[variant] = package;
       }
     }
     return AppRelease(
@@ -256,6 +269,7 @@ class UpdateService {
       assetDigest: picked?.digest ?? '',
       publishedAt: (json['published_at'] ?? '').toString(),
       windowsDeltas: deltas,
+      windowsPackages: packages,
     );
   }
 

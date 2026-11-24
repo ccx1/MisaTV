@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
@@ -17,42 +18,113 @@ class UpdateDownloadCancelled implements Exception {
 
 /// 应用内更新下载：支持断点续传、大小与 SHA-256 校验。
 class UpdateDownloader {
-  static bool _applyingDelta = false;
+  static bool _updatingWindows = false;
 
-  static Future<bool> tryWindowsDelta(
+  static bool canInstallWindows(AppRelease release) =>
+      Platform.isWindows &&
+      (release.windowsDeltas.isNotEmpty || release.windowsPackages.isNotEmpty);
+
+  static Future<void> installWindows(
     AppRelease release, {
+    required bool skipDelta,
+    required void Function(String status, bool installing) onStatus,
     required void Function(int received, int total) onProgress,
-    required void Function() onPreparing,
     bool Function()? isCancelled,
   }) async {
-    if (!Platform.isWindows || release.windowsDeltas.isEmpty) return false;
+    if (_updatingWindows) throw StateError('已有更新任务正在运行');
     final exe = File(Platform.resolvedExecutable);
-    final root = exe.parent;
-    final helper = File(p.join(root.path, 'apply_windows_delta.ps1'));
-    if (!await helper.exists() || _applyingDelta) return false;
-    _applyingDelta = true;
-    Directory? session;
-    var committed = false;
-    var workerStarted = false;
+    final helper = File(p.join(exe.parent.path, 'apply_windows_delta.ps1'));
+    _updatingWindows = true;
     try {
+      if (!await helper.exists()) throw StateError('应用目录缺少更新脚本');
       final hasRuntimes = await File(
-        p.join(root.path, 'runtimes', 'ready.json'),
+        p.join(exe.parent.path, 'runtimes', 'ready.json'),
       ).exists();
       final variant = hasRuntimes ? 'full' : 'lite';
-      final asset = release.windowsDeltas[variant];
-      if (asset == null) return false;
+      final delta = skipDelta ? null : release.windowsDeltas[variant];
+      var deltaFailed = skipDelta;
+      if (delta != null) {
+        try {
+          await _applyWindowsPackage(
+            release.tag,
+            delta,
+            variant,
+            exe,
+            helper,
+            isDelta: true,
+            onStatus: onStatus,
+            onProgress: onProgress,
+            isCancelled: isCancelled,
+          );
+          return;
+        } on UpdateDownloadCancelled {
+          rethrow;
+        } catch (error) {
+          AppLog.w('update', '差异更新失败，改用整包：$error');
+          deltaFailed = true;
+          if (isCancelled?.call() ?? false) {
+            throw const UpdateDownloadCancelled();
+          }
+        }
+      }
+      final package = release.windowsPackages[variant];
+      if (package == null) throw StateError('该版本缺少与当前安装包型匹配且可校验的整包');
+      await _applyWindowsPackage(
+        release.tag,
+        package,
+        variant,
+        exe,
+        helper,
+        isDelta: false,
+        deltaFailed: deltaFailed,
+        onStatus: onStatus,
+        onProgress: onProgress,
+        isCancelled: isCancelled,
+      );
+    } finally {
+      _updatingWindows = false;
+    }
+  }
+
+  static Future<void> _applyWindowsPackage(
+    String tag,
+    UpdateAsset asset,
+    String variant,
+    File exe,
+    File helper, {
+    required bool isDelta,
+    bool deltaFailed = false,
+    required void Function(String status, bool installing) onStatus,
+    required void Function(int received, int total) onProgress,
+    bool Function()? isCancelled,
+  }) async {
+    final archiveName = isDelta ? 'delta.zip' : 'full.zip';
+    Directory? session;
+    var workerStarted = false;
+    var workerFailed = false;
+    int? workerExitCode;
+    try {
+      if (isCancelled?.call() ?? false) throw const UpdateDownloadCancelled();
       final temp = session = await Directory.systemTemp.createTemp(
-        'misatv-delta-',
+        'misatv-update-',
+      );
+      onStatus(
+        isDelta
+            ? '正在下载差异包'
+            : deltaFailed
+            ? '差异更新失败，正在下载整包'
+            : '正在下载整包',
+        false,
       );
       onProgress(0, asset.size);
       await _downloadAsset(
         asset,
-        File(p.join(temp.path, 'delta.zip')),
+        File(p.join(temp.path, archiveName)),
         onProgress: onProgress,
         isCancelled: isCancelled,
       );
       if (isCancelled?.call() ?? false) throw const UpdateDownloadCancelled();
-      onPreparing();
+      onStatus('正在校验并准备安装，完成后将自动重启', false);
 
       // 更新时可以替换安装目录里的原脚本。
       final script = await helper.copy(p.join(temp.path, 'apply.ps1'));
@@ -63,7 +135,8 @@ class UpdateDownloader {
         'v1.0',
         'powershell.exe',
       );
-      await Process.start(powershell, [
+      // Windows PowerShell 在 detached 模式会退出，常规子进程可在应用退出后继续安装。
+      final worker = await Process.start(powershell, [
         '-NoLogo',
         '-NoProfile',
         '-NonInteractive',
@@ -76,7 +149,7 @@ class UpdateDownloader {
         '-Session',
         temp.path,
         '-Root',
-        root.path,
+        exe.parent.path,
         '-ExeName',
         p.basename(exe.path),
         '-ParentPid',
@@ -84,49 +157,62 @@ class UpdateDownloader {
         '-From',
         'v$kAppVersion',
         '-To',
-        release.tag,
+        tag,
         '-Variant',
         variant,
         '-Digest',
         asset.digest.substring('sha256:'.length),
-      ], mode: ProcessStartMode.detached);
+        if (!isDelta) '-FullPackage',
+      ]);
       workerStarted = true;
+      unawaited(worker.stdout.drain<void>());
+      unawaited(worker.stderr.drain<void>());
+      unawaited(worker.exitCode.then((code) => workerExitCode = code));
       final ready = File(p.join(temp.path, 'ready'));
       final failed = File(p.join(temp.path, 'failed'));
+      Future<void> checkWorker() async {
+        if (await failed.exists()) {
+          workerFailed = true;
+          AppLog.w('update', 'Windows 安装脚本失败：${await failed.readAsString()}');
+          throw StateError('无法准备或安装更新，请检查应用目录是否可写');
+        }
+        if (workerExitCode != null) {
+          workerFailed = true;
+          throw StateError('Windows 安装脚本提前退出（退出码 $workerExitCode）');
+        }
+      }
+
       final elapsed = Stopwatch()..start();
       while (!await ready.exists()) {
         if (isCancelled?.call() ?? false) throw const UpdateDownloadCancelled();
-        if (await failed.exists()) {
-          throw StateError(await failed.readAsString());
-        }
-        if (elapsed.elapsed > const Duration(minutes: 2)) {
-          throw StateError('准备差异更新超时');
+        await checkWorker();
+        if (elapsed.elapsed > Duration(minutes: isDelta ? 2 : 10)) {
+          throw StateError('准备安装更新超时');
         }
         await Future<void>.delayed(const Duration(milliseconds: 150));
       }
       if (isCancelled?.call() ?? false) throw const UpdateDownloadCancelled();
+      onStatus('正在关闭应用并安装更新', true);
       await File(p.join(temp.path, 'commit')).writeAsString('', flush: true);
       await closeAppWindow();
-      committed = true;
-      return true;
-    } on UpdateDownloadCancelled {
-      rethrow;
-    } catch (error) {
-      AppLog.w('update', '差异更新失败，改用完整包：$error');
-      return false;
+      // 正常安装会退出当前进程。如果关窗失败，等待脚本报错。
+      elapsed.reset();
+      while (elapsed.elapsed < const Duration(seconds: 25)) {
+        await checkWorker();
+        await Future<void>.delayed(const Duration(milliseconds: 150));
+      }
+      await checkWorker();
+      throw StateError('等待应用退出超时，请重试');
     } finally {
-      if (!committed) {
-        _applyingDelta = false;
-        if (session != null) {
-          try {
-            if (workerStarted) {
-              await File(p.join(session.path, 'cancel')).writeAsString('');
-            } else {
-              await session.delete(recursive: true);
-            }
-          } on FileSystemException {
-            // 临时目录清理失败不影响完整包下载。
+      if (session != null) {
+        try {
+          if (workerStarted && !workerFailed) {
+            await File(p.join(session.path, 'cancel')).writeAsString('');
+          } else {
+            await session.delete(recursive: true);
           }
+        } on FileSystemException {
+          // 临时目录清理失败不影响重试。
         }
       }
     }

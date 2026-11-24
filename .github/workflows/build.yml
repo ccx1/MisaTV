@@ -82,7 +82,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: 验证 Windows 差异更新和回滚
+      - name: 验证 Windows 差异更新、整包更新和回滚
         run: python -B tool/test_windows_delta.py -v
 
       - name: 准备内置 JVM / 加固壳 / Python / Yaozhi MPV

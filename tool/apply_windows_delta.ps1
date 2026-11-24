@@ -6,7 +6,8 @@ param(
     [Parameter(Mandatory = $true)][string]$From,
     [Parameter(Mandatory = $true)][string]$To,
     [Parameter(Mandatory = $true)][ValidateSet('full', 'lite')][string]$Variant,
-    [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{64}$')][string]$Digest
+    [Parameter(Mandatory = $true)][ValidatePattern('^[a-f0-9]{64}$')][string]$Digest,
+    [switch]$FullPackage
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -20,8 +21,9 @@ function Get-SafeTarget([string]$RelativePath) {
             throw "Unsafe update path: $RelativePath"
         }
         $path = [IO.Path]::Combine($path, $part)
-        $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-        if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        try { $attributes = [IO.File]::GetAttributes($path) }
+        catch [IO.FileNotFoundException], [IO.DirectoryNotFoundException] { continue }
+        if ($attributes -band [IO.FileAttributes]::ReparsePoint) {
             throw "Update path uses a reparse point: $RelativePath"
         }
     }
@@ -47,11 +49,34 @@ function Assert-Base($Entry) {
     }
 }
 
+function Stage-FullPackage($Zip) {
+    $paths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    foreach ($file in $Zip.Entries) {
+        if ([IO.File]::Exists((Join-Path $Session 'cancel'))) { return }
+        $path = $file.FullName.Replace('\', '/')
+        if ($path.EndsWith('/')) { continue }
+        $target = Get-SafeTarget $path
+        if (!$paths.Add($path) -or [IO.Directory]::Exists($target)) {
+            throw "Invalid package file: $path"
+        }
+        $index = $changed.Count
+        $payload = Join-Path $stage "new-$index"
+        [IO.Compression.ZipFileExtensions]::ExtractToFile($file, $payload)
+        $changed.Add(@{ path = $path; payload = $payload; backup = Join-Path $stage "old-$index" })
+    }
+    if (!$paths.Contains('MisaTV.exe') -or !$paths.Contains('data/app.so') -or
+        $paths.Contains('runtimes/ready.json') -ne ($Variant -eq 'full')) {
+        throw 'Invalid Windows package layout or type'
+    }
+}
+
 $stage = $null
 $lock = $null
 $parent = $null
 $restart = $false
 $rollbackFailed = $false
+$failure = $null
+$zipPath = Join-Path $Session $(if ($FullPackage) { 'full.zip' } else { 'delta.zip' })
 $changed = [System.Collections.Generic.List[object]]::new()
 $undo = [System.Collections.Generic.List[object]]::new()
 try {
@@ -60,47 +85,52 @@ try {
     $stage = Join-Path $Root ('.misatv-update-' + [guid]::NewGuid().ToString('N'))
     $lock = [IO.FileStream]::new((Join-Path $Root '.misatv-update.lock'), 'OpenOrCreate', 'ReadWrite', 'None', 4096, 'DeleteOnClose')
     [IO.Directory]::CreateDirectory($stage) | Out-Null
-    $zipPath = Join-Path $Session 'delta.zip'
+    $expectedRuntime = $Variant -eq 'full'
+    if ((Test-Path -LiteralPath (Get-SafeTarget 'runtimes/ready.json') -PathType Leaf) -ne $expectedRuntime) {
+        throw 'Installed package type does not match'
+    }
     if ((Get-Sha256 $zipPath) -ine $Digest) {
-        throw 'Invalid delta archive SHA-256'
+        throw 'Invalid update archive SHA-256'
     }
     $zip = [IO.Compression.ZipFile]::OpenRead($zipPath)
     try {
-        $manifest = $zip.GetEntry('delta.json')
-        if (!$manifest -or $manifest.Length -gt 8MB) { throw 'Invalid delta manifest' }
-        $reader = [IO.StreamReader]::new($manifest.Open())
-        try { $plan = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
-        if ($plan.schema -ne 1 -or $plan.from -cne $From -or
-            $plan.to -cne $To -or $plan.variant -cne $Variant) { throw 'Delta release mismatch' }
-        $expectedRuntime = $Variant -eq 'full'
-        if ((Test-Path -LiteralPath (Get-SafeTarget 'runtimes/ready.json') -PathType Leaf) -ne $expectedRuntime) {
-            throw 'Installed package type does not match'
-        }
-        $paths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
-        foreach ($entry in $plan.files) {
-            if (!$paths.Add($entry.path) -or (!$entry.before -and !$entry.after) -or
-                ($null -ne $entry.before -and $entry.before -cnotmatch '^[a-f0-9]{64}$') -or
-                ($null -ne $entry.after -and $entry.after -cnotmatch '^[a-f0-9]{64}$')) {
-                throw 'Invalid delta file record'
-            }
-            Assert-Base $entry
-            if ($entry.before -ceq $entry.after) { continue }
-            $index = $changed.Count
-            $payload = Join-Path $stage "new-$index"
-            if ($entry.after) {
-                $file = $zip.GetEntry("files/$($entry.path)")
-                if (!$file -or $file.Length -ne $entry.size) { throw "Missing delta payload: $($entry.path)" }
-                [IO.Compression.ZipFileExtensions]::ExtractToFile($file, $payload)
-                if ((Get-Sha256 $payload) -ine $entry.after) {
-                    throw "Invalid delta payload: $($entry.path)"
+        if ($FullPackage) {
+            Stage-FullPackage $zip
+        } else {
+            $manifest = $zip.GetEntry('delta.json')
+            if (!$manifest -or $manifest.Length -gt 8MB) { throw 'Invalid delta manifest' }
+            $reader = [IO.StreamReader]::new($manifest.Open())
+            try { $plan = $reader.ReadToEnd() | ConvertFrom-Json } finally { $reader.Dispose() }
+            if ($plan.schema -ne 1 -or $plan.from -cne $From -or
+                $plan.to -cne $To -or $plan.variant -cne $Variant) { throw 'Delta release mismatch' }
+            $paths = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            foreach ($entry in $plan.files) {
+                if (!$paths.Add($entry.path) -or (!$entry.before -and !$entry.after) -or
+                    ($null -ne $entry.before -and $entry.before -cnotmatch '^[a-f0-9]{64}$') -or
+                    ($null -ne $entry.after -and $entry.after -cnotmatch '^[a-f0-9]{64}$')) {
+                    throw 'Invalid delta file record'
                 }
+                Assert-Base $entry
+                if ($entry.before -ceq $entry.after) { continue }
+                $index = $changed.Count
+                $payload = $null
+                if ($entry.after) {
+                    $payload = Join-Path $stage "new-$index"
+                    $file = $zip.GetEntry("files/$($entry.path)")
+                    if (!$file -or $file.Length -ne $entry.size) { throw "Missing delta payload: $($entry.path)" }
+                    [IO.Compression.ZipFileExtensions]::ExtractToFile($file, $payload)
+                    if ((Get-Sha256 $payload) -ine $entry.after) {
+                        throw "Invalid delta payload: $($entry.path)"
+                    }
+                }
+                $changed.Add(@{ path = $entry.path; entry = $entry; payload = $payload; backup = Join-Path $stage "old-$index" })
             }
-            $changed.Add(@{ entry = $entry; payload = $payload; backup = Join-Path $stage "old-$index" })
+            if (!$paths.Contains('MisaTV.exe') -or !$paths.Contains('data/app.so') -or
+                ($expectedRuntime -and !$paths.Contains('runtimes/ready.json'))) { throw 'Missing base checks' }
         }
-        if (!$paths.Contains('MisaTV.exe') -or !$paths.Contains('data/app.so') -or
-            ($expectedRuntime -and !$paths.Contains('runtimes/ready.json'))) { throw 'Missing base checks' }
     } finally { $zip.Dispose() }
 
+    if ([IO.File]::Exists((Join-Path $Session 'cancel'))) { return }
     [IO.File]::WriteAllText((Join-Path $Session 'ready'), '')
     $deadline = [DateTime]::UtcNow.AddSeconds(30)
     while (!(Test-Path -LiteralPath (Join-Path $Session 'commit'))) {
@@ -108,19 +138,23 @@ try {
             (Test-Path -LiteralPath (Join-Path $Session 'cancel'))) { return }
         Start-Sleep -Milliseconds 150
     }
+    if (Test-Path -LiteralPath (Join-Path $Session 'cancel')) { return }
     if (!$parent.WaitForExit(20000)) { throw 'MisaTV did not exit' }
     $restart = $true
 
-    foreach ($item in $changed) { Assert-Base $item.entry }
+    if (!$FullPackage) {
+        foreach ($item in $changed) { Assert-Base $item.entry }
+    }
     foreach ($item in $changed) {
-        $target = Get-SafeTarget $item.entry.path
+        $target = Get-SafeTarget $item.path
         $operation = @{ target = $target; backup = $item.backup; moved = $false; installed = $false }
         $undo.Add($operation)
-        if ($item.entry.before) {
+        if (($FullPackage -and [IO.File]::Exists($target)) -or
+            (!$FullPackage -and $item.entry.before)) {
             [IO.File]::Move($target, $item.backup)
             $operation.moved = $true
         }
-        if ($item.entry.after) {
+        if ($item.payload) {
             [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target)) | Out-Null
             [IO.File]::Move($item.payload, $target)
             $operation.installed = $true
@@ -129,9 +163,7 @@ try {
     Start-Process -FilePath (Join-Path $Root $ExeName) -WorkingDirectory $Root
     $restart = $false
 } catch {
-    if ($parent -and !$parent.HasExited) {
-        [IO.File]::WriteAllText((Join-Path $Session 'failed'), $_.Exception.Message)
-    }
+    $failure = $_.Exception.Message
     for ($index = $undo.Count - 1; $index -ge 0; $index--) {
         $operation = $undo[$index]
         try {
@@ -147,9 +179,20 @@ try {
         try { [IO.Directory]::Delete($stage, $true) } catch {}
     }
     if ($lock) { $lock.Dispose() }
-    try { [IO.File]::Delete((Join-Path $Session 'delta.zip')) } catch {}
+    try { [IO.File]::Delete($zipPath) } catch {}
+    if ($failure -and !$restart -and ![IO.File]::Exists((Join-Path $Session 'cancel'))) {
+        $errorFile = Join-Path $Session 'error.tmp'
+        [IO.File]::WriteAllText($errorFile, $failure)
+        [IO.File]::Move($errorFile, (Join-Path $Session 'failed'))
+    } else {
+        foreach ($name in @('apply.ps1', 'ready', 'commit', 'cancel')) {
+            try { [IO.File]::Delete((Join-Path $Session $name)) } catch {}
+        }
+        try { [IO.Directory]::Delete($Session) } catch {}
+    }
     if ($restart -and !$rollbackFailed) {
         $exe = Join-Path $Root $ExeName
-        Start-Process -FilePath $exe -WorkingDirectory $Root -ArgumentList "--misatv-full-update=$To"
+        $argument = if ($FullPackage) { "--misatv-update-failed=$To" } else { "--misatv-full-update=$To" }
+        Start-Process -FilePath $exe -WorkingDirectory $Root -ArgumentList $argument
     }
 }

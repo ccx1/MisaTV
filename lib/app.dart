@@ -86,10 +86,16 @@ class _AppTitleBarObserver extends NavigatorObserver {
 final NavigatorObserver _titleBarObserver = _AppTitleBarObserver();
 
 class KniephosApp extends StatelessWidget {
-  const KniephosApp({super.key, required this.state, this.fullUpdateTag});
+  const KniephosApp({
+    super.key,
+    required this.state,
+    this.fullUpdateTag,
+    this.failedUpdateTag,
+  });
 
   final AppState state;
   final String? fullUpdateTag;
+  final String? failedUpdateTag;
 
   @override
   Widget build(BuildContext context) {
@@ -154,6 +160,7 @@ class KniephosApp extends StatelessWidget {
             // 启动后检查 GitHub release，有新版本就弹窗（见 UpdateGate）。
             home: UpdateGate(
               fullUpdateTag: fullUpdateTag,
+              failedUpdateTag: failedUpdateTag,
               child: const AppShell(),
             ),
           );
