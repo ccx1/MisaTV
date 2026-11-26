@@ -19,6 +19,7 @@ import '../../models/live.dart';
 import '../../models/site_config.dart';
 import '../../models/user_data.dart';
 import '../../models/vod.dart';
+import '../../services/live/channel_grid.dart';
 import '../../services/live/epg.dart';
 import '../../services/live/live_ua_policy.dart';
 import '../../services/live/tvbus.dart';
@@ -1043,7 +1044,9 @@ class _LivePlayerPageState extends State<LivePlayerPage>
           defaultTargetPlatform == TargetPlatform.android;
       unawaited(
         SystemChrome.setEnabledSystemUIMode(
-          keepImmersive ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge,
+          keepImmersive
+              ? SystemUiMode.immersiveSticky
+              : SystemUiMode.edgeToEdge,
         ),
       );
     }
@@ -1578,28 +1581,200 @@ class _ChannelPickerSheetState extends State<_ChannelPickerSheet> {
   int? _hoveredGroupIndex;
   String? _hoveredChannelKey;
 
+  /// 分组列表与频道网格的滚动控制器：打开菜单时用来定位到当前分组 / 当前频道，
+  /// 而不是每次都停在第一个分组的第一条。
+  final ScrollController _groupScroll = ScrollController();
+  final ScrollController _channelScroll = ScrollController();
+
+  /// 频道网格本体，用来取实际列宽换算「当前频道落在第几行」。
+  final GlobalKey _gridKey = GlobalKey();
+
+  /// 当前频道的格子。它在一个弹层生命周期内不会变化（`widget.current` 固定），
+  /// 所以这把 key 不会在列表项之间迁移，可以安全地用 [Scrollable.ensureVisible]
+  /// 做第二段精确定位。
+  ///
+  /// 分组行**不放** key：用户点分组时「当前分组」会换行，GlobalKey 跟着迁移
+  /// 会冒重复 key / 元素重挂的风险，而分组行高实测后纯算术已经够准。
+  final GlobalKey _currentChannelKey = GlobalKey();
+
+  /// 分组列表第一行。首帧它必然被建出来，用它量真实行高——
+  /// 字号 / 缩放一变，按常量估算的误差会随行数累积，滚远一点就定位不到。
+  final GlobalKey _firstGroupKey = GlobalKey();
+
+  /// 实测的分组行高（含下方 6px 间距）；还没量到时用常量兜底。
+  double? _measuredGroupExtent;
+
+  /// 分组行的固定高度（含下面 6px 间距）与频道格子的尺寸。
+  /// 定位偏移靠它们精确换算，必须与 [ListView] / [GridView] 的布局参数保持一致。
+  static const double _groupItemExtent = 48;
+  static const double _groupGap = 6;
+  static const double _channelCellMaxWidth = 170;
+  static const double _channelCellHeight = 54;
+  static const double _channelGap = 8;
+
+  @override
+  void initState() {
+    super.initState();
+    // 首帧时列表才完成布局，滚动到当前项只能在这一帧之后做。
+    WidgetsBinding.instance.addPostFrameCallback((_) => _revealCurrent());
+  }
+
+  @override
+  void dispose() {
+    _groupScroll.dispose();
+    _channelScroll.dispose();
+    super.dispose();
+  }
+
   String _channelKey(LiveChannel channel) =>
       '${channel.name}\u0000${channel.urls.join('|')}';
 
+  /// 换台菜单默认停在哪一组。
+  ///
+  /// 优先取「当前频道真正所在的那一组」：`initialGroup` 只是打开播放器时用户
+  /// 在列表里停留的分组，用它（或干脆回落到第 0 组）会让菜单打开时停在别的组，
+  /// 当前频道根本不在这一组里，用户看到的就是「从头开始」。
   int _initialIndex() {
+    for (var i = 0; i < widget.groups.length; i++) {
+      if (_channelIndexOf(i) >= 0) return i;
+    }
     final byName = widget.groups.indexWhere(
       (g) => g.group == widget.initialGroup,
     );
-    if (byName >= 0) return byName;
-    for (var i = 0; i < widget.groups.length; i++) {
-      for (final channel in widget.groups[i].channels) {
-        if (channel.name == widget.current.name &&
-            channel.urls.join('|') == widget.current.urls.join('|')) {
-          return i;
-        }
-      }
-    }
-    return 0;
+    return byName >= 0 ? byName : 0;
   }
 
   bool _isCurrent(LiveChannel channel) {
     return channel.name == widget.current.name &&
         channel.urls.join('|') == widget.current.urls.join('|');
+  }
+
+  /// 当前频道在指定分组里的下标；找不到返回 -1。
+  int _channelIndexOf(int groupIndex) {
+    if (groupIndex < 0 || groupIndex >= widget.groups.length) return -1;
+    final channels = widget.groups[groupIndex].channels;
+    for (var i = 0; i < channels.length; i++) {
+      if (_isCurrent(channels[i])) return i;
+    }
+    return -1;
+  }
+
+  /// 把左侧分组列表滚到当前分组、右侧频道网格滚到当前频道。
+  ///
+  /// 换台菜单原本只记住「停留在哪个分组」，频道网格永远从第一条开始，
+  /// 频道一多用户就得自己往下翻——这正是「换台后默认从头开始」的来源。
+  /// 先按行高粗定位（目标可能在懒加载区域之外），下一帧再用
+  /// [Scrollable.ensureVisible] 把真正建出来的那一格精确摆到中间。
+  void _revealCurrent() {
+    if (!mounted) return;
+    _scrollGroupsIntoView();
+    _scrollChannelsIntoView();
+    WidgetsBinding.instance.addPostFrameCallback(
+      (_) => _centerCurrentChannel(),
+    );
+  }
+
+  /// 第二段：当前频道格已进入树中，按真实几何居中，容忍字号 / 缩放差异。
+  ///
+  /// 粗定位的 jumpTo 要到下一帧才把目标项建出来，所以这里最多重试几帧，
+  /// 每次重试都连粗定位一起重来（弹层入场动画期间控制器可能还没接上）。
+  /// 都拿不到就放弃——宁可停在粗定位的位置，也不要把滚动硬塞给错项。
+  void _centerCurrentChannel([int attempt = 0]) {
+    if (!mounted) return;
+    final ctx = _currentChannelKey.currentContext;
+    if (ctx != null) {
+      Scrollable.ensureVisible(
+        ctx,
+        alignment: 0.5,
+        duration: Duration.zero,
+        alignmentPolicy: ScrollPositionAlignmentPolicy.explicit,
+      );
+      return;
+    }
+    if (attempt >= 4) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _scrollGroupsIntoView();
+      _scrollChannelsIntoView();
+      _centerCurrentChannel(attempt + 1);
+    });
+  }
+
+  /// 换分组后的网格位置：新分组里还有当前频道就继续定位到它，否则回到顶部。
+  /// 保留上一个分组的滚动位置只会让人以为点错了分组。
+  void _afterGroupChanged() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      if (_channelIndexOf(_groupIndex) >= 0) {
+        _revealCurrent();
+        return;
+      }
+      if (!_channelScroll.hasClients) return;
+      final position = _channelScroll.position;
+      if ((position.pixels - position.minScrollExtent).abs() < 0.5) return;
+      _channelScroll.jumpTo(position.minScrollExtent);
+    });
+  }
+
+  /// 量一次第一行的真实行高；量不到就保持 null，由调用处用常量兜底。
+  void _measureGroupExtent() {
+    if (_measuredGroupExtent != null) return;
+    final box = _firstGroupKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.hasSize || box.size.height <= 0) return;
+    _measuredGroupExtent = box.size.height + _groupGap;
+  }
+
+  void _scrollGroupsIntoView() {
+    if (!_groupScroll.hasClients) return;
+    final position = _groupScroll.position;
+    if (!position.hasViewportDimension) return;
+    _measureGroupExtent();
+    final extent = _measuredGroupExtent ?? (_groupItemExtent + _groupGap);
+    final itemHeight = extent - _groupGap;
+    // 让当前分组大致停在可视区中间，上下都还能看到相邻分组。
+    final target =
+        _groupIndex * extent - (position.viewportDimension - itemHeight) / 2;
+    final offset = target.clamp(
+      position.minScrollExtent,
+      position.maxScrollExtent,
+    );
+    if ((offset - position.pixels).abs() < 0.5) return;
+    _groupScroll.jumpTo(offset);
+  }
+
+  void _scrollChannelsIntoView() {
+    if (!_channelScroll.hasClients) return;
+    final position = _channelScroll.position;
+    if (!position.hasViewportDimension) return;
+    final index = _channelIndexOf(_groupIndex);
+    if (index < 0) return;
+    // 让当前频道停在网格可视区中间附近，前后都还能看到相邻台。
+    final offset = channelGridOffsetFor(
+      index: index,
+      columns: _channelColumns(),
+      viewportExtent: position.viewportDimension,
+      maxOffset: position.maxScrollExtent,
+      minOffset: position.minScrollExtent,
+      cellExtent: _channelCellHeight,
+      cellSpacing: _channelGap,
+    );
+    if ((offset - position.pixels).abs() < 0.5) return;
+    _channelScroll.jumpTo(offset);
+  }
+
+  /// 换台菜单每一行放几个：换算规则与 Flutter 网格一致，见 [channelGridColumns]。
+  int _channelColumns() => channelGridColumns(
+    _gridWidth(),
+    maxCrossAxisExtent: _channelCellMaxWidth,
+    crossAxisSpacing: _channelGap,
+  );
+
+  /// 频道网格的实际宽度；首帧布局完成前按屏幕宽度估算。
+  double _gridWidth() {
+    final box = _gridKey.currentContext?.findRenderObject() as RenderBox?;
+    if (box != null && box.hasSize && box.size.width > 0) return box.size.width;
+    // 弹层左右各 20 padding，左侧分组栏 150、栏间间距 12。
+    return MediaQuery.sizeOf(context).width - 20 * 2 - 150 - 12;
   }
 
   @override
@@ -1634,6 +1809,7 @@ class _ChannelPickerSheetState extends State<_ChannelPickerSheet> {
                     SizedBox(
                       width: 150,
                       child: ListView.separated(
+                        controller: _groupScroll,
                         itemCount: groups.length,
                         separatorBuilder: (_, _) => const SizedBox(height: 6),
                         itemBuilder: (_, index) {
@@ -1641,7 +1817,11 @@ class _ChannelPickerSheetState extends State<_ChannelPickerSheet> {
                           final active = index == _groupIndex;
                           return InkWell(
                             borderRadius: BorderRadius.circular(10),
-                            onTap: () => setState(() => _groupIndex = index),
+                            onTap: () {
+                              if (index == _groupIndex) return;
+                              setState(() => _groupIndex = index);
+                              _afterGroupChanged();
+                            },
                             onHover: (hovering) => setState(() {
                               if (hovering) {
                                 _hoveredGroupIndex = index;
@@ -1650,6 +1830,9 @@ class _ChannelPickerSheetState extends State<_ChannelPickerSheet> {
                               }
                             }),
                             child: Container(
+                              // 只在第一行挂量尺寸用的 key。GlobalKey 不能跟着
+                              // active 行迁移，否则会重复 key / 元素重挂。
+                              key: index == 0 ? _firstGroupKey : null,
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 12,
                                 vertical: 10,
@@ -1700,18 +1883,21 @@ class _ChannelPickerSheetState extends State<_ChannelPickerSheet> {
                     const SizedBox(width: 12),
                     Expanded(
                       child: GridView.builder(
+                        key: _gridKey,
+                        controller: _channelScroll,
                         gridDelegate:
                             const SliverGridDelegateWithMaxCrossAxisExtent(
-                              maxCrossAxisExtent: 170,
-                              mainAxisExtent: 54,
-                              crossAxisSpacing: 8,
-                              mainAxisSpacing: 8,
+                              maxCrossAxisExtent: _channelCellMaxWidth,
+                              mainAxisExtent: _channelCellHeight,
+                              crossAxisSpacing: _channelGap,
+                              mainAxisSpacing: _channelGap,
                             ),
                         itemCount: group.channels.length,
                         itemBuilder: (_, index) {
                           final channel = group.channels[index];
                           final active = _isCurrent(channel);
                           return InkWell(
+                            key: active ? _currentChannelKey : null,
                             borderRadius: BorderRadius.circular(10),
                             onTap: () => Navigator.of(context)
                                 .pop((channel: channel, group: group.group)),

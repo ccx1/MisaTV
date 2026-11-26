@@ -1032,20 +1032,75 @@ Future<void> _importLocalPyFiles(BuildContext context) async {
   }
 }
 
+/// 本地 TXT / M3U 直播源：可选择并入已有直播订阅，或新建一个直播订阅。
+///
+/// 与点播的 [_importLocalPyFiles] 同一套逻辑：多份文件也可以一次归到同一个
+/// 订阅下，而不是每条都变成一条散落的本地线路。
 Future<void> _importLocalLive(BuildContext context) async {
   final app = AppScope.of(context);
   try {
-    final path = await FileDialogService.pickFile(
+    final paths = await FileDialogService.pickFiles(
       types: [FileDialogService.liveType],
     );
-    if (path == null) return;
-    final imported = await LocalLiveService.importFile(path);
-    final url = LocalLiveService.fileUrlOfPath(imported.filePath);
-    await app.addLocalLive(
-      LiveBean(name: imported.name, api: url, type: '0', url: url, timeout: 15),
+    if (paths == null || paths.isEmpty) return;
+
+    final imported = <({String name, String url})>[];
+    for (final path in paths) {
+      final item = await LocalLiveService.importFile(path);
+      imported.add((
+        name: item.name,
+        url: LocalLiveService.fileUrlOfPath(item.filePath),
+      ));
+    }
+    if (!context.mounted) return;
+
+    final target = await showLiveImportTargetDialog(
+      context,
+      profiles: app.liveProfiles,
+      initialProfileId: app.activeLiveProfileId,
+      suggestedName: imported.length == 1 ? imported.first.name : '本地直播源',
+      fileCount: imported.length,
+    );
+    if (target == null || !context.mounted) return;
+
+    // 并入已有直播订阅：写回该订阅的 rawJson，刷新订阅时不会被冲掉。
+    if (target.profileId != null) {
+      final entries = [
+        for (final item in imported)
+          <String, dynamic>{
+            'name': item.name,
+            'api': item.url,
+            'url': item.url,
+            'type': 0,
+            'timeout': 15,
+          },
+      ];
+      final ok = await app.addLivesToProfile(target.profileId!, entries);
+      if (!context.mounted) return;
+      _settingsSnack(
+        context,
+        ok
+            ? '已把 ${imported.length} 个直播源加入订阅「${target.name}」'
+            : '目标订阅无法添加直播线路（可能不是 JSON 配置）',
+      );
+      return;
+    }
+
+    // 新建订阅：包成只含 lives 的 JSON，和导入 M3U / TXT 地址的行为一致。
+    final outcome = await app.importFromLocalText(
+      jsonEncode({
+        'lives': [
+          for (final item in imported)
+            {'name': item.name, 'api': item.url, 'type': 0, 'timeout': 15},
+        ],
+      }),
+      name: target.name,
     );
     if (!context.mounted) return;
-    _settingsSnack(context, '已导入本地直播源「${imported.name}」');
+    _settingsSnack(
+      context,
+      '已创建直播订阅「${outcome.profile.name}」：${outcome.profile.liveCount} 条线路',
+    );
   } catch (e) {
     if (context.mounted) _settingsSnack(context, '导入本地直播源失败：$e');
   }

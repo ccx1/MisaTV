@@ -1,11 +1,14 @@
 /// 纯 Dart 字幕解析：SRT / WebVTT / ASS(SSA) → 统一 cue 列表。
 ///
 /// 逐函数移植自旧版 `src/engine/subtitle/parseSubtitle.ts`，
-/// 保留 `SubtitleText.decode` 的编码探测顺序（BOM、严格 UTF-8、GBK）。
+/// 并保留 `SubtitleText.decode` 的编码探测顺序（BOM、严格 UTF-8、GBK）。
 library;
 
 import 'dart:convert';
 
+// 用 charset 的常量映射 GBK 解码器，而不是 gbk_codec：后者的 `gbk_bytes` 是顶层
+// final，首次使用时才用 24000+ 条条目现场构造映射表，初始化一旦失败会直接打掉
+// 整个 isolate（表现为整批用例 did not complete），在并发/低内存环境偶发。
 import 'package:charset/charset.dart' show gbk;
 
 /// 单条字幕。
@@ -65,7 +68,10 @@ List<SubtitleCue> parseSrt(String text) {
 /// WebVTT：头部 WEBVTT（可选 NOTE/STYLE/REGION 等区块），其余同 SRT cue。
 List<SubtitleCue> parseVtt(String text) {
   final out = <SubtitleCue>[];
-  final content = text.replaceFirst(RegExp(r'^\uFEFF?WEBVTT[^\n]*(?:\n|$)'), '');
+  final content = text.replaceFirst(
+    RegExp(r'^\uFEFF?WEBVTT[^\n]*(?:\n|$)'),
+    '',
+  );
   final blocks = content.split(RegExp(r'\r?\n\s*\r?\n'));
   for (final b in blocks) {
     final lines = b
@@ -121,13 +127,17 @@ List<SubtitleCue> parseAss(String text) {
 
 List<SubtitleCue> _parseBySniff(String text) {
   final head = text.length > 3000 ? text.substring(0, 3000) : text;
-  if (RegExp(r'\[Script Info\]|(^|\r?\n)\s*Dialogue:', caseSensitive: false)
-      .hasMatch(head)) {
+  if (RegExp(
+    r'\[Script Info\]|(^|\r?\n)\s*Dialogue:',
+    caseSensitive: false,
+  ).hasMatch(head)) {
     final c = parseAss(text);
     if (c.isNotEmpty) return c;
   }
-  if (RegExp(r'WEBVTT', caseSensitive: false)
-      .hasMatch(text.length > 200 ? text.substring(0, 200) : text)) {
+  if (RegExp(
+    r'WEBVTT',
+    caseSensitive: false,
+  ).hasMatch(text.length > 200 ? text.substring(0, 200) : text)) {
     final c = parseVtt(text);
     if (c.isNotEmpty) return c;
   }
@@ -158,11 +168,7 @@ List<SubtitleCue> shiftCues(List<SubtitleCue> cues, double offsetSec) {
     final end = c.end + offsetSec;
     if (end <= 0) continue;
     final s = start < 0 ? 0.0 : start;
-    out.add(SubtitleCue(
-      start: s,
-      end: end < s ? s : end,
-      text: c.text,
-    ));
+    out.add(SubtitleCue(start: s, end: end < s ? s : end, text: c.text));
   }
   return out;
 }
@@ -208,7 +214,7 @@ class SubtitleText {
     try {
       return utf8.decode(bytes);
     } on FormatException {
-      // 尝试旧字幕常用的 GBK 编码。
+      // 严格 UTF-8 失败 → 尝试旧字幕常用的 GBK 编码。
     }
     try {
       return gbk.decode(bytes);

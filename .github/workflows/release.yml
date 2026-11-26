@@ -74,6 +74,13 @@ jobs:
     needs: version
     if: needs.version.outputs.publish == 'true'
     uses: ./.github/workflows/build-android.yml
+    secrets: inherit
+
+  android-tv:
+    needs: version
+    if: needs.version.outputs.publish == 'true'
+    uses: ./.github/workflows/build-android-tv.yml
+    secrets: inherit
 
   macos:
     needs: version
@@ -82,7 +89,7 @@ jobs:
 
   publish:
     name: 发布 ${{ needs.version.outputs.tag }}
-    needs: [version, windows, android, macos]
+    needs: [version, windows, android, android-tv, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -126,10 +133,11 @@ jobs:
           mv MisaTV-windows-x64/MisaTV-windows-x64-lite.zip .
           mv MisaTV-windows-x64/MisaTV-windows-x64-standard.zip .
           mv MisaTV-macos-arm64/MisaTV-macos-arm64.zip .
-          mv misatv-android/build/app/outputs/flutter-apk/app-release.apk MisaTV-android-arm64.apk
+          mv misatv-android/build/app/outputs/flutter-apk/app-full-release.apk MisaTV-android-arm64.apk
+          mv misatv-android-tv/MisaTV-TV-arm64.apk .
           shopt -s nullglob
           assets=(MisaTV-windows-x64.zip MisaTV-windows-x64-lite.zip MisaTV-windows-x64-standard.zip
-            MisaTV-android-arm64.apk MisaTV-macos-arm64.zip MisaTV-delta-x64-*.zip)
+            MisaTV-android-arm64.apk MisaTV-TV-arm64.apk MisaTV-macos-arm64.zip MisaTV-delta-x64-*.zip)
           sha256sum "${assets[@]}" > SHA256SUMS.txt
 
           release=$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \

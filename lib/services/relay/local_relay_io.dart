@@ -768,7 +768,8 @@ class LocalRelay {
             'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
       }
     }
-    final m1905Link = targetHost == 'm1905.com' || targetHost.endsWith('.m1905.com');
+    final m1905Link =
+        targetHost == 'm1905.com' || targetHost.endsWith('.m1905.com');
     if (m1905Link && _headerValue(headers, HttpHeaders.refererHeader).isEmpty) {
       headers[HttpHeaders.refererHeader] = 'https://www.1905.com/';
     }
@@ -843,11 +844,13 @@ class LocalRelay {
     //   所以网盘线路上没有 Range 时，主动合成首段 `bytes=0-<span-1>`，
     //   让上游回 206 + Content-Range —— 有总长、能 seek、速度也回到正常档。
     final knownTotal = _playTotalSizes[target];
-    final firstSpan = knownTotal != null && knownTotal < _firstUpstreamRangeBytes
+    final firstSpan =
+        knownTotal != null && knownTotal < _firstUpstreamRangeBytes
         ? knownTotal
         : _firstUpstreamRangeBytes;
     var clamped = _shouldClampRange(provider, target)
-        ? clampRange(range, totalLength: knownTotal) ?? 'bytes=0-${firstSpan - 1}'
+        ? clampRange(range, totalLength: knownTotal) ??
+              'bytes=0-${firstSpan - 1}'
         : range;
     final manifest =
         target.toLowerCase().contains('.m3u8') ||
@@ -1944,7 +1947,8 @@ class LocalRelay {
     final res = request.response;
     final rawQuery = request.uri.query;
     final reqPath = request.uri.path;
-    final targetPath = reqPath.startsWith('/proxy/') &&
+    final targetPath =
+        reqPath.startsWith('/proxy/') &&
             int.tryParse(reqPath.substring('/proxy/'.length)) == null
         ? reqPath
         : '/proxy';
@@ -1998,7 +2002,9 @@ class LocalRelay {
       }
       if (isPlainText && request.method != 'HEAD') {
         final bytes = await _readLimited(upstream);
-        final head = utf8.decode(bytes.take(64).toList(), allowMalformed: true).trimLeft();
+        final head = utf8
+            .decode(bytes.take(64).toList(), allowMalformed: true)
+            .trimLeft();
         if (head.startsWith('#EXTM3U')) {
           bufferedPlainM3u8 = bytes;
         } else {

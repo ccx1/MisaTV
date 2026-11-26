@@ -99,14 +99,118 @@ jobs:
           sed -i "s/getDefaultProguardFile('proguard-android.txt')/getDefaultProguardFile('proguard-android-optimize.txt')/g" "$f"
           echo "patched: $f"
 
+      - name: Decode Android release keystore
+        # 用固定 keystore 签 release APK。
+        #
+        # 不签名或不固定 keystore 的后果：Gradle 回退到 debug keystore，而它是
+        # 每台机器首次构建时自动生成的，runner 一换指纹就变，用户装过旧版之后
+        # 新版本会因「签名冲突」装不上（INSTALL_FAILED_UPDATE_INCOMPATIBLE）。
+        #
+        # 需要的 4 个 secret：
+        #   ANDROID_KEYSTORE_BASE64   keystore 文件的 base64（单行或带换行均可）
+        #   ANDROID_STORE_PASSWORD    keystore 密码
+        #   ANDROID_KEY_ALIAS         密钥别名
+        #   ANDROID_KEY_PASSWORD      密钥密码
+        #
+        # 只做手动触发与发布（workflow_dispatch / push tag）时必须具备；
+        # 普通 PR 不构建 Android，走不到这一步。
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          STORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          missing=""
+          [ -z "$KEYSTORE_B64" ]  && missing="$missing ANDROID_KEYSTORE_BASE64"
+          [ -z "$STORE_PASSWORD" ] && missing="$missing ANDROID_STORE_PASSWORD"
+          [ -z "$KEY_ALIAS" ]      && missing="$missing ANDROID_KEY_ALIAS"
+          [ -z "$KEY_PASSWORD" ]   && missing="$missing ANDROID_KEY_PASSWORD"
+          if [ -n "$missing" ]; then
+            echo "::error::缺少签名 secret:$missing"
+            echo "release 包必须用固定 keystore 签名，否则用户无法覆盖安装。"
+            echo "请在仓库 Settings → Secrets and variables → Actions 里补齐。"
+            exit 1
+          fi
+
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            dest="$RUNNER_TEMP/release.jks"
+          else
+            dest="$RUNNER_TEMP/release.jks"
+          fi
+          # base64 -d 对带换行的输入也能处理；tr 先去掉换行更稳。
+          printf '%s' "$KEYSTORE_B64" | tr -d '\r\n ' | base64 -d > "$dest"
+          if [ ! -s "$dest" ]; then
+            echo "::error::keystore 解码失败（结果为空），检查 ANDROID_KEYSTORE_BASE64 是否为有效 base64"
+            exit 1
+          fi
+          # 只打印大小与指纹，绝不打印密码或 keystore 内容。
+          ls -l "$dest"
+          echo "keystore 解码完成"
+
+          {
+            echo "ANDROID_KEYSTORE_PATH=$dest"
+            echo "ANDROID_STORE_PASSWORD=$STORE_PASSWORD"
+            echo "ANDROID_KEY_ALIAS=$KEY_ALIAS"
+            echo "ANDROID_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
+
       - name: Build release APK
-        run: flutter build apk --release --target-platform android-arm64
+        run: flutter build apk --release --flavor full --target-platform android-arm64
+
+      - name: Verify APK is signed with the release keystore
+        # 兜底断言：即使上面的步骤被人改坏，也要在发布前发现「包是 debug 签名」。
+        # debug 签名的 CN 固定是 "Android Debug"，出现即视为失败。
+        shell: bash
+        run: |
+          apk=build/app/outputs/flutter-apk/app-full-release.apk
+          if [ ! -f "$apk" ]; then
+            echo "::error::找不到 APK：$apk"
+            exit 1
+          fi
+          # 在 build-tools 里定位 apksigner。实测 GitHub 的 ubuntu runner
+          # （SDK 37.0.0）布局与文档不同，三次踩坑：
+          #   1) `-name 'apksigner*'` 先匹配到 lib/apksigner.jar，执行报 126；
+          #   2) `-path '*/bin/apksigner' -type f` 找不到，bin/ 下压根没有它；
+          #   3) 实际可执行脚本在 build-tools/<ver>/apksigner（build-tools 根目录）。
+          # 所以按「根目录脚本 → bin 脚本 → java -jar」三级回退。
+          sdk="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-}}"
+          if [ -z "$sdk" ] || [ ! -d "$sdk/build-tools" ]; then
+            for cand in "$LOCALAPPDATA/Android/Sdk" "$ANDROID_HOME" "$ANDROID_SDK_ROOT" \
+                        "$HOME/AppData/Local/Android/Sdk" "/usr/local/lib/android/sdk"; do
+              if [ -n "$cand" ] && [ -d "$cand/build-tools" ]; then sdk="$cand"; break; fi
+            done
+          fi
+          bt=$(ls -d "$sdk"/build-tools/* 2>/dev/null | sort -V | tail -1)
+          echo "build-tools: $bt"
+
+          APKSIGNER_CMD=""
+          for cand in "$bt/apksigner" "$bt/bin/apksigner" "$bt/apksigner.bat" "$bt/bin/apksigner.bat"; do
+            if [ -x "$cand" ]; then APKSIGNER_CMD="\"$cand\""; echo "使用 apksigner 脚本: $cand"; break; fi
+          done
+          if [ -z "$APKSIGNER_CMD" ]; then
+            jar=$(find "$bt" -name 'apksigner.jar' 2>/dev/null | head -1)
+            if [ -n "$jar" ]; then
+              APKSIGNER_CMD="java -jar \"$jar\""
+              echo "回退 java -jar: $jar"
+            else
+              echo "::error::未找到 apksigner（sdk=$sdk, bt=$bt）——这一步不能跳过，否则 debug 签名的包会直接发出去"
+              ls -l "$bt" | head -20
+              exit 1
+            fi
+          fi
+          info=$(eval "$APKSIGNER_CMD verify --print-certs '$apk'" 2>&1)
+          echo "$info"
+          if echo "$info" | grep -qi "Android Debug"; then
+            echo "::error::APK 仍是 debug 签名，用户无法覆盖安装更新版本"
+            exit 1
+          fi
+          echo "签名校验通过"
 
       # 只发布 arm64 包，但 Gradle 默认会把插件依赖里的 armeabi-v7a / x86_64
       # 原生库一起塞进 APK（1.2.0 实测多带 25 MB）。这条断言防止回退。
       - name: Verify APK only contains arm64 native libs
         run: |
-          apk=build/app/outputs/flutter-apk/app-release.apk
+          apk=build/app/outputs/flutter-apk/app-full-release.apk
           libs=$(unzip -l "$apk" | awk '{print $4}' | grep '^lib/' || true)
           echo "$libs" | sort -u
           if echo "$libs" | grep -Eq '^lib/(x86|x86_64|armeabi-v7a)/'; then
@@ -123,7 +227,7 @@ jobs:
       # 这里在 CI 直接兜住（libpython 必须真的打进 arm64 APK）。
       - name: Verify bundled Python runtime
         run: |
-          apk=build/app/outputs/flutter-apk/app-release.apk
+          apk=build/app/outputs/flutter-apk/app-full-release.apk
           if unzip -l "$apk" | grep -qE 'lib/arm64-v8a/libpython3\.12\.so|assets/chaquopy/'; then
             echo "Python runtime bundled"
             unzip -l "$apk" | grep -E 'libpython3\.12\.so|assets/chaquopy/' | head -20
@@ -135,12 +239,12 @@ jobs:
       # 校验随包资源确实进了 APK，并生成清单方便核对。
       - name: Verify bundled shell-real assets
         run: |
-          apk=build/app/outputs/flutter-apk/app-release.apk
+          apk=build/app/outputs/flutter-apk/app-full-release.apk
           ls -lh "$apk"
           unzip -l "$apk" | grep 'assets/flutter_assets/assets/jvm/shell-real/' > /tmp/shell_entries.txt || true
           jar_count=$(grep -c '\.jar$' /tmp/shell_entries.txt || true)
           {
-            echo "APK: app-release.apk"
+            echo "APK: app-full-release.apk"
             echo "shell-real jars staged: $SHELL_JAR_COUNT"
             echo "shell-real jars bundled in APK: $jar_count"
             cat /tmp/shell_entries.txt
@@ -152,7 +256,7 @@ jobs:
       # 蜘蛛时抛 ClassNotFoundException —— 这里在 CI 里直接兜住。
       - name: Verify CatVod host classes survived R8
         run: |
-          apk="$GITHUB_WORKSPACE/build/app/outputs/flutter-apk/app-release.apk"
+          apk="$GITHUB_WORKSPACE/build/app/outputs/flutter-apk/app-full-release.apk"
           work=$(mktemp -d)
           unzip -o -q "$apk" 'classes*.dex' -d "$work"
           # 宿主 API 类 + 加固壳运行时链接的 Java 库：APK 自身代码完全不引用它们，
@@ -192,7 +296,7 @@ jobs:
         with:
           name: misatv-android
           path: |
-            build/app/outputs/flutter-apk/app-release.apk
+            build/app/outputs/flutter-apk/app-full-release.apk
             build-manifest.txt
           if-no-files-found: error
           retention-days: 30

@@ -76,3 +76,8 @@ app.*.map.json
 
 # 本地临时脚本 / 探针文件，绝不入库
 .tmp*
+
+# 构建期准备的随包运行时（体积大，由 tool/prepare_windows_runtimes.ps1 生成）
+/runtime/
+/.rtcache/
+/.cmsg.txt

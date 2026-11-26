@@ -6,10 +6,7 @@
 
 /// 主清单里的一档码率。
 class HlsVariant {
-  const HlsVariant({
-    required this.url,
-    required this.bandwidth,
-  });
+  const HlsVariant({required this.url, required this.bandwidth});
 
   final String url;
   final int bandwidth;
@@ -55,8 +52,7 @@ class HlsPlaylist {
   bool get hasInit => initUri != null && initUri!.isNotEmpty;
 }
 
-bool isHlsMasterPlaylist(String text) =>
-    text.contains('#EXT-X-STREAM-INF');
+bool isHlsMasterPlaylist(String text) => text.contains('#EXT-X-STREAM-INF');
 
 /// 选出码率最高的一档；没有主清单信息时返回 null。
 String? pickHlsVariant(String text, String base) {
@@ -99,8 +95,9 @@ HlsPlaylist parseHlsMediaPlaylist(String text, String base) {
     if (line.isEmpty) continue;
     if (line.startsWith('#EXTINF:')) {
       final seconds = double.tryParse(line.substring(8).split(',').first);
-      durationSeconds =
-          seconds != null && seconds.isFinite && seconds > 0 ? seconds : 0;
+      durationSeconds = seconds != null && seconds.isFinite && seconds > 0
+          ? seconds
+          : 0;
       continue;
     }
     if (line.startsWith('#EXT-X-MEDIA-SEQUENCE:')) {
@@ -163,9 +160,8 @@ HlsPlaylist parseHlsMediaPlaylist(String text, String base) {
 
 /// 读取 `#EXT-X-*` 属性（`NAME=value` 或 `NAME="value"`）。
 String? hlsAttribute(String line, String name) {
-  final match = RegExp(
-    '(?:^|[:,])${RegExp.escape(name)}=("[^"]*"|[^,]*)',
-  ).firstMatch(line);
+  final match = RegExp('(?:^|[:,])${RegExp.escape(name)}=("[^"]*"|[^,]*)')
+      .firstMatch(line);
   if (match == null) return null;
   var value = (match.group(1) ?? '').trim();
   if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {

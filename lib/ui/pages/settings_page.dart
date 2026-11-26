@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../app.dart';
+import '../../core/app_variant.dart';
 import '../../core/app_version.dart';
 import '../../core/logging/app_log.dart';
 import '../../core/net/proxy_config.dart';
@@ -2008,6 +2009,8 @@ class SettingsPageState extends State<SettingsPage> {
                             ),
                             contentPadding: EdgeInsets.zero,
                           ),
+                          const Divider(height: 24),
+                          _SpiderPoolSizeTile(app: app),
                         ],
                       ),
                     ),
@@ -2198,42 +2201,42 @@ class SettingsPageState extends State<SettingsPage> {
                               : app.clearSearchHistory,
                         ),
                         const Divider(height: 24),
-                      _ActionRow(
-                                icon: Icons.folder_open_rounded,
-                                title: '运行日志',
-                                subtitle: AppLog.directory.isEmpty
-                                    ? 'Web 版不写本地日志'
-                                    : '${AppLog.directory}（点此打开目录或导出到下载/MisaTV）',
-                                onTap: AppLog.directory.isEmpty
-                                    ? null
-                                    : () async {
-                                        try {
-                                          final exported =
-                                              await AppLog.exportLatestLog();
-                                          if (exported != null) {
-                                            if (!context.mounted) return;
-                                            final msg = exported.isEmpty
-                                                ? '暂无可导出的日志文件'
-                                                : '已导出运行日志到：$exported';
-                                            ScaffoldMessenger.of(context)
-                                                .showSnackBar(
-                                              SnackBar(content: Text(msg)),
-                                            );
-                                            return;
-                                          }
-                                        } catch (e) {
-                                          if (context.mounted) {
-                                            ScaffoldMessenger.of(context)
-                                                .showSnackBar(
-                                              SnackBar(
-                                                  content: Text('导出日志失败：$e')),
-                                            );
-                                          }
-                                          return;
-                                        }
-                                        await AppLog.openDirectory();
-                                      },
-                              ),
+                        _ActionRow(
+                          icon: Icons.folder_open_rounded,
+                          title: '运行日志',
+                          subtitle: AppLog.directory.isEmpty
+                              ? 'Web 版不写本地日志'
+                              : '${AppLog.directory}（点此打开目录或导出到下载/MisaTV）',
+                          onTap: AppLog.directory.isEmpty
+                              ? null
+                              : () async {
+                                  try {
+                                    final exported =
+                                        await AppLog.exportLatestLog();
+                                    if (exported != null) {
+                                      if (!context.mounted) return;
+                                      final msg = exported.isEmpty
+                                          ? '暂无可导出的日志文件'
+                                          : '已导出运行日志到：$exported';
+                                      ScaffoldMessenger.of(context)
+                                          .showSnackBar(
+                                            SnackBar(content: Text(msg)),
+                                          );
+                                      return;
+                                    }
+                                  } catch (e) {
+                                    if (context.mounted) {
+                                      ScaffoldMessenger.of(
+                                        context,
+                                      ).showSnackBar(
+                                        SnackBar(content: Text('导出日志失败：$e')),
+                                      );
+                                    }
+                                    return;
+                                  }
+                                  await AppLog.openDirectory();
+                                },
+                        ),
                       ],
                     ),
                   ),
@@ -2378,11 +2381,32 @@ class SettingsPageState extends State<SettingsPage> {
 }
 
 /// 设置页的父分类（分页）。原有的可折叠分类分别挂在这四页下面。
-const _settingsPages = <(IconData, String)>[
+const _allSettingsPages = <(IconData, String)>[
   (Icons.video_library_outlined, '内容与订阅'),
   (Icons.play_circle_outline_rounded, '播放与外观'),
   (Icons.cloud_outlined, '网盘与数据'),
   (Icons.shield_outlined, '安全与关于'),
+];
+
+/// TV 版只留两个分页。
+///
+/// 砍掉的两页在电视上没有意义：
+///   · 「安全与关于」= R18 过滤密码 + 老板键 —— TV 没人用老板键；
+///   · 「播放与外观」= 主题色 / 字号 / 快捷键 / 性能调参 —— 遥控器上很难操作，
+///     而且 TV 的外观基本是固定的深色大屏。
+///
+/// 注意这里用**索引映射**而不是直接改 `_settingsPages`：
+/// 页面重建时 `_pageIndex` 是真实下标（0/1/2/3），只有分页条上的显示项被过滤，
+/// 否则点「网盘与数据」会跳到「播放与外观」的内容。
+const List<int> _tvVisiblePages = <int>[0, 2];
+
+/// 当前构建下分页条要显示的 (真实下标, 图标, 标题)。
+List<(int, IconData, String)> get _visibleSettingsPages => [
+  for (final i
+      in kMisaTv
+          ? _tvVisiblePages
+          : List<int>.generate(_allSettingsPages.length, (x) => x))
+    (i, _allSettingsPages[i].$1, _allSettingsPages[i].$2),
 ];
 
 /// 设置页卡片容器：桌面沿用玻璃面板，安卓换成扁平 Material 卡片。
@@ -2428,16 +2452,16 @@ class _SettingsPager extends StatelessWidget {
         scrollDirection: Axis.horizontal,
         child: Row(
           children: [
-            for (var i = 0; i < _settingsPages.length; i++)
+            for (final page in _visibleSettingsPages)
               InkWell(
-                onTap: () => onChanged(i),
+                onTap: () => onChanged(page.$1),
                 child: Container(
                   padding: const EdgeInsets.fromLTRB(14, 12, 14, 10),
                   decoration: BoxDecoration(
                     border: Border(
                       bottom: BorderSide(
                         width: 2,
-                        color: index == i
+                        color: index == page.$1
                             ? theme.colorScheme.primary
                             : Colors.transparent,
                       ),
@@ -2447,20 +2471,20 @@ class _SettingsPager extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Icon(
-                        _settingsPages[i].$1,
+                        page.$2,
                         size: 18,
-                        color: index == i
+                        color: index == page.$1
                             ? theme.colorScheme.primary
                             : theme.colorScheme.onSurfaceVariant,
                       ),
                       const SizedBox(width: 6),
                       Text(
-                        _settingsPages[i].$2,
+                        page.$3,
                         style: theme.textTheme.labelLarge?.copyWith(
-                          color: index == i
+                          color: index == page.$1
                               ? theme.colorScheme.primary
                               : theme.colorScheme.onSurfaceVariant,
-                          fontWeight: index == i
+                          fontWeight: index == page.$1
                               ? FontWeight.w700
                               : FontWeight.w500,
                         ),
@@ -2480,9 +2504,9 @@ class _SettingsPager extends StatelessWidget {
         spacing: 4,
         runSpacing: 4,
         children: [
-          for (var i = 0; i < _settingsPages.length; i++)
+          for (final page in _visibleSettingsPages)
             InkWell(
-              onTap: () => onChanged(i),
+              onTap: () => onChanged(page.$1),
               borderRadius: BorderRadius.circular(14),
               child: AnimatedContainer(
                 duration: const Duration(milliseconds: 180),
@@ -2491,12 +2515,12 @@ class _SettingsPager extends StatelessWidget {
                   vertical: 10,
                 ),
                 decoration: BoxDecoration(
-                  color: index == i
+                  color: index == page.$1
                       ? theme.colorScheme.primary.withValues(alpha: 0.16)
                       : Colors.transparent,
                   borderRadius: BorderRadius.circular(14),
                   border: Border.all(
-                    color: index == i
+                    color: index == page.$1
                         ? theme.colorScheme.primary.withValues(alpha: 0.35)
                         : Colors.transparent,
                   ),
@@ -2505,22 +2529,22 @@ class _SettingsPager extends StatelessWidget {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(
-                      _settingsPages[i].$1,
+                      page.$2,
                       size: 16,
-                      color: index == i
+                      color: index == page.$1
                           ? theme.colorScheme.primary
                           : theme.colorScheme.onSurface.withValues(alpha: 0.76),
                     ),
                     const SizedBox(width: 6),
                     Text(
-                      _settingsPages[i].$2,
+                      page.$3,
                       style: theme.textTheme.labelLarge?.copyWith(
-                        color: index == i
+                        color: index == page.$1
                             ? theme.colorScheme.primary
                             : theme.colorScheme.onSurface.withValues(
                                 alpha: 0.75,
                               ),
-                        fontWeight: index == i
+                        fontWeight: index == page.$1
                             ? FontWeight.w700
                             : FontWeight.w500,
                       ),
