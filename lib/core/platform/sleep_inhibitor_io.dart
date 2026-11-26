@@ -18,7 +18,9 @@ class SleepInhibitor {
   static const _continuous = 0x80000000;
   static const _systemRequired = 0x00000001;
   static const _displayRequired = 0x00000002;
-  static const _androidChannel = MethodChannel('com.kniephos.kniephos/sleep_inhibitor');
+  static const _androidChannel = MethodChannel(
+    'com.kniephos.kniephos/sleep_inhibitor',
+  );
 
   static _SetThreadExecutionStateDart? _fn;
   static int _depth = 0;
@@ -46,7 +48,9 @@ class SleepInhibitor {
   static void _setKeepScreenOn(bool enabled) {
     if (Platform.isWindows) {
       _callWindows(
-        enabled ? (_continuous | _systemRequired | _displayRequired) : _continuous,
+        enabled
+            ? (_continuous | _systemRequired | _displayRequired)
+            : _continuous,
       );
     } else if (Platform.isAndroid) {
       _androidChannel
@@ -58,9 +62,10 @@ class SleepInhibitor {
   static void _callWindows(int flags) {
     try {
       _fn ??= DynamicLibrary.open('kernel32.dll')
-          .lookupFunction<_SetThreadExecutionStateNative, _SetThreadExecutionStateDart>(
-        'SetThreadExecutionState',
-      );
+          .lookupFunction<
+            _SetThreadExecutionStateNative,
+            _SetThreadExecutionStateDart
+          >('SetThreadExecutionState');
       _fn!(flags);
     } catch (_) {
       // 非 Windows / 调用失败（权限、无桌面会话）时静默忽略，不影响播放

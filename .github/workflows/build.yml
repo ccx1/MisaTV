@@ -35,6 +35,9 @@ jobs:
       - name: 拉取依赖
         run: flutter pub get
 
+      - name: 格式检查
+        run: dart format --output=none --set-exit-if-changed lib test tool
+
       - name: 静态分析
         run: flutter analyze
 

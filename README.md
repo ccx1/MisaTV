@@ -174,7 +174,7 @@ flutter pub get
 flutter analyze
 flutter test                 # 纯逻辑单测，不依赖真实源站
 flutter run -d windows       # 需要 Visual Studio 的 C++ 桌面开发工具链
-flutter run -d android       # 64 位设备 / 模拟器；构建机需要 Python 3.12（Chaquopy）
+flutter run -d android --flavor full  # 64 位设备 / 模拟器，需要 Python 3.12（Chaquopy）
 flutter run -d chrome
 ```
 

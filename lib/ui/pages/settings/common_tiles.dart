@@ -40,7 +40,7 @@ class _DriveAccountRow extends StatelessWidget {
     'bili' => Icons.smart_display_outlined,
     'thunder' => Icons.bolt_rounded,
     'guangya' => Icons.cloud_sync_outlined,
-      _ => Icons.cloud_outlined,
+    _ => Icons.cloud_outlined,
   };
 
   bool get _webLogin => driveSupportsWebLogin(provider);
@@ -199,7 +199,9 @@ class _DriveAccountRow extends StatelessWidget {
       margin: const EdgeInsets.symmetric(vertical: 4),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.45),
+        color: theme.colorScheme.surfaceContainerHighest.withValues(
+          alpha: 0.45,
+        ),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Row(
@@ -367,3 +369,77 @@ class _AccentDot extends StatelessWidget {
   }
 }
 
+/// 每个 JAR 源的常驻 JVM 上限（1–8）。
+///
+/// 为什么值得暴露给用户：这个值直接决定「同一个 JAR 源的多个请求能不能真正
+/// 并行」。调到 1 最省内存但所有请求排队；调大能缓解「订阅里 JAR 源一多就
+/// 慢 / 丢结果」，代价是每只 JVM 约 16–128 MB。
+///
+/// 用滑杆而不是输入框：取值只有 8 档，滑动比输入更省事，也不会输错。
+class _SpiderPoolSizeTile extends StatelessWidget {
+  const _SpiderPoolSizeTile({required this.app});
+
+  final AppState app;
+
+  static const _max = 8;
+
+  String _hint(int value) {
+    if (value <= 1) return '最省内存：所有 JAR 请求排队串行，慢但稳';
+    if (value <= 3) return '默认：兼顾内存与并行度';
+    if (value <= 5) return '并行更好：JAR 源多时更快，内存占用上升';
+    return '最大并行：适合 JAR 源多、内存充裕的机器';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final value = app.playerSettings.spiderPoolSize;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                '每个 JAR 源的常驻 JVM 上限',
+                style: theme.textTheme.titleSmall,
+              ),
+            ),
+            Text(
+              '$value 只',
+              style: theme.textTheme.titleSmall?.copyWith(
+                color: theme.colorScheme.primary,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 2),
+        Text(
+          '多个 JAR 源同时搜索时，每个源最多起这么多取数进程。'
+          '调大能减少排队，但每只进程约占 16–128 MB 内存。',
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+            height: 1.5,
+          ),
+        ),
+        Slider(
+          value: value.toDouble(),
+          min: 1,
+          max: _max.toDouble(),
+          divisions: _max - 1,
+          label: '$value',
+          onChanged: (v) => app.setPlayerSettings(
+            app.playerSettings.copyWith(spiderPoolSize: v.round()),
+          ),
+        ),
+        Text(
+          _hint(value),
+          style: theme.textTheme.labelSmall?.copyWith(
+            color: theme.colorScheme.onSurface.withValues(alpha: 0.5),
+          ),
+        ),
+      ],
+    );
+  }
+}

@@ -2,8 +2,6 @@ package com.kniephos.kniephos
 
 import android.content.ContentValues
 import android.content.Context
-import android.content.Intent
-import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import android.os.Environment
@@ -46,30 +44,21 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun ensureAllFilesAccessIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
-        if (Environment.isExternalStorageManager()) return
-        val prefs = getSharedPreferences("misatv_perms", Context.MODE_PRIVATE)
-        if (prefs.getBoolean("asked_all_files_v1", false)) return
-        prefs.edit().putBoolean("asked_all_files_v1", true).apply()
-        runOnUiThread {
-            try {
-                startActivity(Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, Uri.parse("package:$packageName")))
-            } catch (_: Throwable) {
-                try { startActivity(Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)) } catch (_: Throwable) {}
-            }
-        }
-    }
-
     private fun exportLogFileToDownloads(srcPath: String, displayName: String): String {
         val src = File(srcPath)
         if (!src.exists() || !src.isFile) {
             throw IllegalArgumentException("日志文件不存在：$srcPath")
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val mimeType = when {
+                displayName.endsWith(".json", ignoreCase = true) -> "application/json"
+                displayName.endsWith(".m3u", ignoreCase = true) ||
+                    displayName.endsWith(".m3u8", ignoreCase = true) -> "audio/x-mpegurl"
+                else -> "text/plain"
+            }
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, displayName)
-                put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+                put(MediaStore.Downloads.MIME_TYPE, mimeType)
                 put(MediaStore.Downloads.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/MisaTV")
             }
             val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
@@ -89,7 +78,6 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         installSpiderThreadCrashGuard()
-        ensureAllFilesAccessIfNeeded()
         // wex / *Guard 加固壳的 Init.init(Application) 必须拿到真实的 Application。
         // FlutterPluginBinding.applicationContext 在部分机型上是 ContextImpl 而不是
         // Application，插件里再怎么剥 ContextWrapper 都取不到，所以这里从 Activity
@@ -128,6 +116,33 @@ class MainActivity : FlutterActivity() {
                         } catch (t: Throwable) {
                             result.error("EXPORT_FAILED", t.message ?: t.toString(), null)
                         }
+                    }
+                    "getScreenBrightness" -> {
+                        val current = window.attributes.screenBrightness
+                        val brightness = if (current >= 0f) {
+                            current.toDouble()
+                        } else {
+                            try {
+                                val raw = Settings.System.getInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS, 128)
+                                (raw.coerceIn(0, 255) / 255.0)
+                            } catch (_: Throwable) {
+                                0.5
+                            }
+                        }
+                        result.success(brightness.coerceIn(0.0, 1.0))
+                    }
+                    "setScreenBrightness" -> {
+                        val value = (call.arguments as? Number)?.toFloat() ?: -1f
+                        runOnUiThread {
+                            val lp = window.attributes
+                            lp.screenBrightness = if (value < 0f) {
+                                WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+                            } else {
+                                value.coerceIn(0.0f, 1.0f)
+                            }
+                            window.attributes = lp
+                        }
+                        result.success(null)
                     }
                     else -> result.notImplemented()
                 }

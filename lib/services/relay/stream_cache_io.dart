@@ -458,7 +458,8 @@ class StreamCacheRange {
 /// 写入器：一边转发给播放器，一边把同样的字节写进 `<key>.tmp`，
 /// 流正常结束后 rename 成正式条目并记录 content-type。
 class StreamCacheWriter {
-  StreamCacheWriter._(this._writing, {
+  StreamCacheWriter._(
+    this._writing, {
     required this.cache,
     required this.key,
     required this.entry,

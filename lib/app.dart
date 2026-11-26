@@ -89,6 +89,7 @@ class KniephosApp extends StatelessWidget {
   const KniephosApp({
     super.key,
     required this.state,
+    this.rootBuilder,
     this.fullUpdateTag,
     this.failedUpdateTag,
   });
@@ -96,6 +97,16 @@ class KniephosApp extends StatelessWidget {
   final AppState state;
   final String? fullUpdateTag;
   final String? failedUpdateTag;
+
+  /// 根界面构造器。
+  ///
+  /// 默认为 [AppShell]（沉浸 + 常规双形态）。TV 精简版的入口
+  /// （`main_tv.dart`）传入 `TvShell`，**并且完全不 import app_shell.dart** ——
+  /// 这样六个常规页面（约 7600 行）不进编译单元，`libapp.so` 才能真的变小。
+  ///
+  /// 为什么不用运行时 `if (kMisaTv)`：`app_shell.dart` 一旦被 import 就会整个
+  /// 编译进产物，运行时分支省不掉体积。
+  final Widget Function()? rootBuilder;
 
   @override
   Widget build(BuildContext context) {
@@ -161,7 +172,7 @@ class KniephosApp extends StatelessWidget {
             home: UpdateGate(
               fullUpdateTag: fullUpdateTag,
               failedUpdateTag: failedUpdateTag,
-              child: const AppShell(),
+              child: rootBuilder?.call() ?? const AppShell(),
             ),
           );
         },
