@@ -1,11 +1,22 @@
 import 'dart:convert';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show compute, ComputeCallback;
 import 'package:pointycastle/export.dart';
 
 import '../core/net/url_utils.dart';
 import '../core/utils/json_utils.dart';
 import '../models/site_config.dart';
+
+// 大配置的字符串扫描和 JSON 转换会阻塞 Flutter UI。
+Future<R> runConfigWork<M, R>(
+  int size,
+  ComputeCallback<M, R> callback,
+  M message,
+) async {
+  if (size < 64 * 1024) return callback(message);
+  return compute(callback, message);
+}
 
 class ParsedConfig {
   const ParsedConfig({
@@ -168,6 +179,20 @@ class ConfigParser {
     return -1;
   }
 
+  static Future<ParsedConfig> parseAsync(
+    String content, {
+    String baseUrl = '',
+    bool jarReady = false,
+  }) => runConfigWork(content.length, _parseMessage, (
+    content: content,
+    baseUrl: baseUrl,
+    jarReady: jarReady,
+  ));
+
+  static ParsedConfig _parseMessage(
+    ({String content, String baseUrl, bool jarReady}) input,
+  ) => parse(input.content, baseUrl: input.baseUrl, jarReady: input.jarReady);
+
   static ParsedConfig parse(
     String content, {
     String baseUrl = '',
@@ -175,15 +200,6 @@ class ConfigParser {
   }) {
     final warnings = <String>[];
     final text = fixContentPath(baseUrl, decodePayload(content));
-    final multi = parseCollection(text);
-    if (multi != null) {
-      return ParsedConfig(
-        config: SiteConfig(),
-        report: ImportReport.empty,
-        warnings: warnings,
-        multiUrls: multi,
-      );
-    }
     final jsonText = trimJsonObject(text);
     if (jsonText.isEmpty) {
       return ParsedConfig(
@@ -197,6 +213,15 @@ class ConfigParser {
       throw const FormatException('配置顶层必须是 JSON 对象');
     }
     final root = Map<String, dynamic>.from(decoded);
+    final multi = _collectionFromJson(root);
+    if (multi != null) {
+      return ParsedConfig(
+        config: SiteConfig(),
+        report: ImportReport.empty,
+        warnings: warnings,
+        multiUrls: multi,
+      );
+    }
     if (root.containsKey('storeHouse') && !root.containsKey('sites')) {
       warnings.add('检测到 storeHouse 仓库格式，安卓端不支持，已忽略');
     }
@@ -272,30 +297,35 @@ class ConfigParser {
       if (json.isEmpty) return null;
       final decoded = parseJsonLenient(json);
       if (decoded is! Map) return null;
-      final root = Map<String, dynamic>.from(decoded);
-      if (root.containsKey('sites') ||
-          !root.containsKey('urls') ||
-          root['urls'] is! List) {
-        return null;
-      }
-      final out = <MultiConfigEntry>[];
-      for (final element in root['urls'] as List) {
-        var name = '';
-        var url = '';
-        if (element is Map) {
-          final m = Map<String, dynamic>.from(element);
-          name = safeString(m, 'name');
-          url = safeString(m, 'url');
-          if (url.isEmpty) url = safeString(m, 'api');
-        } else if (element is String) {
-          url = element;
-        }
-        if (url.isNotEmpty) out.add(MultiConfigEntry(name: name, url: url));
-      }
-      return out.isEmpty ? null : out;
+      return _collectionFromJson(Map<String, dynamic>.from(decoded));
     } catch (_) {
       return null;
     }
+  }
+
+  static List<MultiConfigEntry>? _collectionFromJson(
+    Map<String, dynamic> root,
+  ) {
+    if (root.containsKey('sites') ||
+        !root.containsKey('urls') ||
+        root['urls'] is! List) {
+      return null;
+    }
+    final out = <MultiConfigEntry>[];
+    for (final element in root['urls'] as List) {
+      var name = '';
+      var url = '';
+      if (element is Map) {
+        final m = Map<String, dynamic>.from(element);
+        name = safeString(m, 'name');
+        url = safeString(m, 'url');
+        if (url.isEmpty) url = safeString(m, 'api');
+      } else if (element is String) {
+        url = element;
+      }
+      if (url.isNotEmpty) out.add(MultiConfigEntry(name: name, url: url));
+    }
+    return out.isEmpty ? null : out;
   }
 
   static SiteParseResult parseSite(
@@ -604,7 +634,10 @@ class ConfigParser {
     return head.startsWith('{') || head.startsWith('[');
   }
 
-  static SiteConfig merge(List<SiteConfig> configs) {
+  static SiteConfig merge(
+    List<SiteConfig> configs, {
+    List<String>? siteKeyPrefixes,
+  }) {
     final sites = <SourceBean>[];
     final seenKeys = <String, int>{};
     final parses = <ParseBean>[];
@@ -618,10 +651,19 @@ class ConfigParser {
     final headers = <String, HeaderRule>{};
     var spider = '';
 
-    for (final c in configs) {
+    for (var index = 0; index < configs.length; index++) {
+      final c = configs[index];
+      final prefix = siteKeyPrefixes?[index];
       for (final original in c.sites) {
-        final site = original.jar.trim().isEmpty && c.spider.trim().isNotEmpty
-            ? SourceBean.fromJson({...original.toJson(), 'jar': c.spider})
+        final useDefaultJar =
+            original.jar.trim().isEmpty && c.spider.trim().isNotEmpty;
+        final site = prefix != null || useDefaultJar
+            ? SourceBean.fromJson({
+                ...original.toJson(),
+                if (prefix != null)
+                  'key': '$prefix${original.key.length}:${original.key}',
+                if (useDefaultJar) 'jar': c.spider,
+              })
             : original;
         var key = site.key;
         if (seenKeys.containsKey(key)) {

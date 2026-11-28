@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -21,6 +22,7 @@ class _SubscriptionHttp extends AppHttp {
   final responses = <String, String>{};
   final requests = <String>[];
   final delays = <String, Duration>{};
+  final gates = <String, Completer<void>>{};
   var pending = 0;
   var maxPending = 0;
 
@@ -36,6 +38,7 @@ class _SubscriptionHttp extends AppHttp {
     if (pending > maxPending) maxPending = pending;
     try {
       await Future<void>.delayed(delays[url] ?? Duration.zero);
+      await gates[url]?.future;
       final body = responses[url];
       if (body == null) throw AppHttpException('HTTP 404');
       return HttpResponseText(url, body, 200, 'application/json');
@@ -193,10 +196,172 @@ void main() {
       http.responses[url] = _site('A');
       http.delays[url] = const Duration(milliseconds: 5);
     }
-    final preview = await app.previewImportText(jsonEncode({'urls': urls}));
+    final progress = <(int, int)>[];
+    final preview = await app.previewImportText(
+      jsonEncode({'urls': urls}),
+      task: SubscriptionImportTask(
+        onProgress: (completed, total) => progress.add((completed, total)),
+      ),
+    );
+    expect(progress, [for (var i = 0; i <= 9; i++) (i, 9)]);
     expect(preview.siteCount, 9);
     expect(preview.mergedCount, 9);
     expect(http.maxPending, inInclusiveRange(2, 4));
+  });
+
+  test('取消直接导入会停止派发子订阅，也不会保存部分结果', () async {
+    final urls = [for (var i = 0; i < 9; i++) 'https://example.test/$i.json'];
+    for (final url in urls) {
+      http.responses[url] = _site('A');
+      http.delays[url] = const Duration(milliseconds: 5);
+    }
+    late final SubscriptionImportTask task;
+    task = SubscriptionImportTask(
+      onProgress: (completed, _) {
+        if (completed == 1) task.cancel();
+      },
+      onSaving: () => fail('已取消的导入开始保存'),
+    );
+
+    await expectLater(
+      app.importFromJson(jsonEncode({'urls': urls}), task: task),
+      throwsA(predicate((error) => error.toString() == '已取消导入')),
+    );
+    expect(http.requests, urls.take(4));
+    expect(app.profiles, isEmpty);
+    expect(app.store.loadProfiles(), isEmpty);
+  });
+
+  test('首条成功后即可使用，后台合入保留选源和删除记录', () async {
+    const slowUrl = 'https://example.test/TVBox/slow.json';
+    const fastUrl = 'https://example.test/TVBox/fast.json';
+    http.responses[root] = '{"urls":["./slow.json","./fast.json"]}';
+    http.responses[slowUrl] = _site('Slow');
+    http.responses[fastUrl] = jsonEncode({
+      'sites': [
+        {
+          'key': 'same',
+          'name': 'Fast',
+          'type': 1,
+          'api': 'https://fast.test/api',
+        },
+        {
+          'key': 'keep',
+          'name': 'Keep',
+          'type': 1,
+          'api': 'https://keep.test/api',
+        },
+      ],
+    });
+    final slow = http.gates[slowUrl] = Completer<void>();
+    addTearDown(() {
+      if (!slow.isCompleted) slow.complete();
+    });
+
+    final preview = await app
+        .previewImportFromUrl(
+          root,
+          task: SubscriptionImportTask(allowBackground: true),
+        )
+        .timeout(const Duration(seconds: 5));
+    expect(preview.siteCount, 2);
+    expect(preview.remainingSubscriptions, 1);
+    expect(app.store.loadProfiles(), isEmpty);
+    final imported = await app.commitImportPreview(preview);
+    expect(imported.profile.siteCount, 2);
+    expect(http.pending, 1);
+    final firstKey = app.config!.sites.first.key;
+    final keepKey = app.config!.sites.last.key;
+    await app.setActiveSite(keepKey);
+    expect(await app.removeSite(firstKey), isTrue);
+
+    final merged = Completer<void>();
+    void onChange() {
+      if (app.config?.sites.any((site) => site.name == 'Slow') == true &&
+          !merged.isCompleted) {
+        merged.complete();
+      }
+    }
+
+    app.addListener(onChange);
+    slow.complete();
+    try {
+      await merged.future.timeout(const Duration(seconds: 5));
+    } finally {
+      app.removeListener(onChange);
+    }
+    expect(app.activeSiteKey, keepKey);
+    expect(app.activeProfile!.id, imported.profile.id);
+    expect(app.config!.sites.map((site) => site.name), ['Slow', 'Keep']);
+    expect(app.activeProfile!.deletedSiteKeys, contains(firstKey));
+    expect(app.profileHistory, isEmpty);
+    final slowKey = app.config!.sites.first.key;
+
+    final refreshed = await app.refreshProfile(imported.profile.id);
+    expect(refreshed.profile.id, imported.profile.id);
+    expect(
+      app.config!.sites.map((site) => site.key),
+      unorderedEquals([keepKey, slowKey]),
+    );
+    expect(app.activeSiteKey, keepKey);
+  });
+
+  test('删除已有首批内容的档案会停止后台合入', () async {
+    const slowUrl = 'https://example.test/TVBox/slow.json';
+    const fastUrl = 'https://example.test/TVBox/fast.json';
+    http.responses[root] = '{"urls":["./slow.json","./fast.json"]}';
+    http.responses[slowUrl] = _site('Slow');
+    http.responses[fastUrl] = _site('Fast');
+    final slow = http.gates[slowUrl] = Completer<void>();
+    addTearDown(() {
+      if (!slow.isCompleted) slow.complete();
+    });
+
+    final task = SubscriptionImportTask(allowBackground: true);
+    final imported = await app
+        .importFromUrl(root, task: task)
+        .timeout(const Duration(seconds: 5));
+    expect(imported.profile.siteCount, 1);
+    await app.removeProfile(imported.profile.id);
+    expect(task.isCancelled, isTrue);
+    slow.complete();
+    await Future<void>.delayed(Duration.zero);
+    expect(app.profiles, isEmpty);
+    expect(app.store.loadProfiles(), isEmpty);
+  });
+
+  test('大配置可确认、重读和切换，并按调用顺序保存', () async {
+    final config = jsonEncode({
+      'urls': ['https://example.test/large.json'],
+    });
+    http.responses['https://example.test/large.json'] = jsonEncode({
+      'sites': [
+        for (var i = 0; i < 1200; i++)
+          {
+            'key': 'large-$i',
+            'name': 'Large site $i',
+            'type': 1,
+            'api': 'https://example.test/api/$i',
+          },
+      ],
+    });
+    final preview = await app.previewImportText(config);
+    expect(preview.text.length, greaterThan(65536));
+    final outcome = await app.commitImportPreview(preview);
+    expect(outcome.profile.siteCount, 1200);
+
+    final store = app.store;
+    final pendingSave = store.saveProfiles([outcome.profile]);
+    final pendingClear = store.saveProfiles([]);
+    await Future.wait([pendingSave, pendingClear]);
+    expect(await store.loadProfilesAsync(), isEmpty);
+
+    final smaller = await app.importFromJson(_site('Other'));
+    await app.activateProfile(outcome.profile.id);
+    expect(app.config?.sites.length, 1200);
+    await app.activateProfile(smaller.profile.id);
+    expect(app.config?.sites.length, 1);
+    expect((await store.loadProfilesAsync()).length, 2);
   });
 
   testWidgets('默认勾选预览时可从导入窗口确认多仓订阅', (tester) async {

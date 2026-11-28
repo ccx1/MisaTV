@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart' show sha256;
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 
@@ -88,6 +89,61 @@ class ImportOutcome {
   int get siteCount => report.total;
 }
 
+/// 手动导入期间的进度和取消信号。
+class SubscriptionImportTask {
+  SubscriptionImportTask({
+    this.allowBackground = false,
+    this.onProgress,
+    this.onSaving,
+  });
+
+  final bool allowBackground;
+
+  final void Function(int completed, int total)? onProgress;
+  final VoidCallback? onSaving;
+  bool _cancelled = false;
+
+  bool get isCancelled => _cancelled;
+
+  void cancel() => _cancelled = true;
+
+  void _checkCancelled() {
+    if (isCancelled) throw const _ImportCancelled();
+  }
+}
+
+typedef _LoadedSubscription = ({
+  int index,
+  String url,
+  ParsedConfig parsed,
+  int size,
+});
+
+typedef _PreparedImport = ({
+  String text,
+  ParsedConfig parsed,
+  int mergedCount,
+  _CollectionImport? background,
+});
+
+class _CollectionImport {
+  _CollectionImport(this.task, this.total);
+
+  final SubscriptionImportTask task;
+  final int total;
+  final first = Completer<_LoadedSubscription?>();
+  final results = <_LoadedSubscription>[];
+  late final Future<void> done;
+  late final Future<_PreparedImport> Function(List<_LoadedSubscription>) merge;
+}
+
+class _ImportCancelled implements Exception {
+  const _ImportCancelled();
+
+  @override
+  String toString() => '已取消导入';
+}
+
 /// 导入前的差异预览。只解析、不落盘；确认后再走 [AppState.commitImportPreview]。
 class ImportPreview {
   const ImportPreview({
@@ -102,8 +158,16 @@ class ImportPreview {
     required this.changed,
     this.warnings = const [],
     this.mergedCount = 0,
+    this._parsed,
+    this._jarReady,
+    this._background,
   });
 
+  final ParsedConfig? _parsed;
+  final bool? _jarReady;
+  final _CollectionImport? _background;
+  int get remainingSubscriptions =>
+      (_background?.total ?? mergedCount) - mergedCount;
   final int mergedCount;
   final String text;
   final String url;
@@ -278,6 +342,16 @@ class AppState extends ChangeNotifier {
   /// 订阅原文快照（每个档案最多 3 份，总量最多 12 份），回滚用。
   List<ConfigSnapshot> profileHistory = [];
   String? activeProfileId;
+  final _backgroundCollections = <String, _CollectionImport>{};
+
+  @override
+  void dispose() {
+    for (final background in _backgroundCollections.values) {
+      background.task.cancel();
+    }
+    _backgroundCollections.clear();
+    super.dispose();
+  }
 
   /// 订阅解析出的基础配置（不含本地 Kazumi 规则源）。
   SiteConfig? _config;
@@ -903,40 +977,36 @@ class AppState extends ChangeNotifier {
 
   /// JVM 安装状态变化后重算各配置的导入诊断（JAR 源不再固定降级）。
   Future<void> _refreshReports() async {
-    final updated = <ConfigProfile>[];
-    for (final p in profiles) {
-      if (p.rawJson.trim().isEmpty) {
-        updated.add(p);
-        continue;
-      }
+    final snapshot = profiles;
+    final updated = <ConfigProfile, ConfigProfile>{};
+    for (final p in snapshot) {
+      if (p.rawJson.trim().isEmpty) continue;
       try {
-        final parsed = ConfigParser.parse(
+        final parsed = await ConfigParser.parseAsync(
           p.rawJson,
           baseUrl: p.resolveBaseUrl,
           jarReady: jarReady,
         );
-        updated.add(
-          ConfigProfile(
-            id: p.id,
-            name: p.name,
-            url: p.url,
-            baseUrl: p.baseUrl,
-            rawJson: p.rawJson,
-            importedAt: p.importedAt,
-            report: parsed.report,
-            siteCount: p.siteCount,
-            liveCount: p.liveCount,
-            lastRefreshAt: p.lastRefreshAt,
-            deletedSiteKeys: p.deletedSiteKeys,
-            addedSiteKeys: p.addedSiteKeys,
-            addedLiveKeys: p.addedLiveKeys,
-          ),
+        updated[p] = ConfigProfile(
+          id: p.id,
+          name: p.name,
+          url: p.url,
+          baseUrl: p.baseUrl,
+          rawJson: p.rawJson,
+          importedAt: p.importedAt,
+          report: parsed.report,
+          siteCount: p.siteCount,
+          liveCount: p.liveCount,
+          lastRefreshAt: p.lastRefreshAt,
+          deletedSiteKeys: p.deletedSiteKeys,
+          addedSiteKeys: p.addedSiteKeys,
+          addedLiveKeys: p.addedLiveKeys,
         );
       } catch (_) {
-        updated.add(p);
+        // 保留无法重新解析的档案。
       }
     }
-    profiles = updated;
+    profiles = [for (final profile in profiles) updated[profile] ?? profile];
     await _persistProfiles();
   }
 
@@ -949,28 +1019,34 @@ class AppState extends ChangeNotifier {
   ///
   /// 任何一个配置解析失败就放弃本次清理，避免把还在用的 JAR 误删。
   Future<void> _purgeUnusedJars() async {
-    final keep = <String>{};
-    for (final p in profiles) {
-      if (p.rawJson.trim().isEmpty) continue;
-      try {
-        final parsed = ConfigParser.parse(
-          p.rawJson,
-          baseUrl: p.resolveBaseUrl,
-          jarReady: jarReady,
-        );
-        keep.addAll(sourceService.jar.jarKeysOf(parsed.config));
-      } catch (_) {
-        return;
+    while (true) {
+      final snapshot = profiles;
+      final runtimeReady = jarReady;
+      final keep = <String>{};
+      for (final profile in snapshot) {
+        if (profile.rawJson.trim().isEmpty) continue;
+        try {
+          final parsed = await ConfigParser.parseAsync(
+            profile.rawJson,
+            baseUrl: profile.resolveBaseUrl,
+            jarReady: runtimeReady,
+          );
+          keep.addAll(sourceService.jar.jarKeysOf(parsed.config));
+        } catch (_) {
+          return;
+        }
       }
+      if (!identical(profiles, snapshot) || jarReady != runtimeReady) continue;
+      await sourceService.jar.purgeJarCaches(keep);
+      return;
     }
-    await sourceService.jar.purgeJarCaches(keep);
   }
 
   /// [playerWindow] = 独立播放器子窗口：只加载播放必需的偏好与配置，
   /// 不探测网盘登录态、不改档案、不清理 JAR 缓存，避免和主窗口互相干扰。
   Future<void> init({bool playerWindow = false}) async {
-    profiles = store.loadProfiles();
-    profileHistory = store.loadProfileHistory();
+    profiles = await store.loadProfilesAsync();
+    profileHistory = await store.loadProfileHistoryAsync();
     // 源健康度跨启动保留：失效源在冷却期内直接跳过，重启后不用再打一遍。
     searchService.breaker.importJsonString(store.sourceHealthJson);
     searchService.onHealthChanged = _scheduleSourceHealthSave;
@@ -1080,8 +1156,8 @@ class AppState extends ChangeNotifier {
         )) {
       await _refreshReports();
     }
-    _loadActiveConfig();
-    _loadActiveLiveConfig();
+    await _loadActiveConfig();
+    await _loadActiveLiveConfig();
     _syncGlobalJar();
     if (!playerWindow) {
       await store.setActiveProfileId(activeProfileId);
@@ -1130,7 +1206,7 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  void _loadActiveConfig() {
+  Future<void> _loadActiveConfig() async {
     // 换档案 / 恢复备份后，旧订阅的同关键词结果不能继续命中。
     searchService.clearCache();
     final profile = activeProfile;
@@ -1141,11 +1217,12 @@ class AppState extends ChangeNotifier {
       return;
     }
     try {
-      final parsed = ConfigParser.parse(
+      final parsed = await ConfigParser.parseAsync(
         profile.rawJson,
         baseUrl: profile.resolveBaseUrl,
         jarReady: jarReady,
       );
+      if (!_sameProfileConfig(activeProfile, profile)) return;
       final effective = _withoutDeletedSites(
         parsed.config,
         profile.deletedSiteKeys,
@@ -1157,6 +1234,7 @@ class AppState extends ChangeNotifier {
         activeSiteKey = fallbackSite?.key;
       }
     } catch (_) {
+      if (!_sameProfileConfig(activeProfile, profile)) return;
       _setConfig(null);
       activeSiteKey = null;
     }
@@ -1235,20 +1313,36 @@ class AppState extends ChangeNotifier {
   }
 
   /// 解析当前直播订阅（与点播档案完全独立）；本地直播线路追加在最后。
-  void _loadActiveLiveConfig() {
+  static bool _sameProfileConfig(
+    ConfigProfile? current,
+    ConfigProfile? loaded,
+  ) {
+    if (identical(current, loaded)) return true;
+    return current != null &&
+        loaded != null &&
+        current.id == loaded.id &&
+        current.rawJson == loaded.rawJson &&
+        current.resolveBaseUrl == loaded.resolveBaseUrl &&
+        listEquals(current.deletedSiteKeys, loaded.deletedSiteKeys);
+  }
+
+  Future<void> _loadActiveLiveConfig() async {
     final profile = activeLiveProfile;
-    liveConfig = null;
+    SiteConfig? loaded;
     if (profile != null) {
       try {
-        liveConfig = ConfigParser.parse(
+        final parsed = await ConfigParser.parseAsync(
           profile.rawJson,
           baseUrl: profile.resolveBaseUrl,
           jarReady: jarReady,
-        ).config;
+        );
+        loaded = parsed.config;
       } catch (_) {
-        liveConfig = null;
+        loaded = null;
       }
     }
+    if (!_sameProfileConfig(activeLiveProfile, profile)) return;
+    liveConfig = loaded;
     final availableLives = lives;
     if (availableLives.isEmpty) {
       activeLiveKey = null;
@@ -1263,30 +1357,50 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<ImportOutcome> importFromUrl(String url, {String? name}) async {
-    final payload = await _loadImportUrl(url, name: name);
+  Future<ImportOutcome> importFromUrl(
+    String url, {
+    String? name,
+    SubscriptionImportTask? task,
+  }) async {
+    final payload = await _loadImportUrl(url, name: name, task: task);
     return _importText(
       payload.text,
       url: payload.url,
       baseUrl: payload.baseUrl,
       name: payload.name,
+      task: task,
     );
   }
 
   /// 导入前预览：拉取 / 解析订阅并与当前点播档案比较，不落盘。
-  Future<ImportPreview> previewImportFromUrl(String url, {String? name}) async {
-    final payload = await _loadImportUrl(url, name: name);
+  Future<ImportPreview> previewImportFromUrl(
+    String url, {
+    String? name,
+    SubscriptionImportTask? task,
+  }) async {
+    final payload = await _loadImportUrl(url, name: name, task: task);
     return _buildImportPreview(
       payload.text,
       url: payload.url,
       baseUrl: payload.baseUrl,
       name: payload.name,
+      task: task,
     );
   }
 
-  Future<ImportPreview> previewImportText(String text, {String? name}) async {
+  Future<ImportPreview> previewImportText(
+    String text, {
+    String? name,
+    SubscriptionImportTask? task,
+  }) async {
     if (text.trim().isEmpty) throw AppException('请粘贴配置 JSON');
-    return _buildImportPreview(text, url: '', baseUrl: '', name: name);
+    return _buildImportPreview(
+      text,
+      url: '',
+      baseUrl: '',
+      name: name,
+      task: task,
+    );
   }
 
   /// 确认预览后真正落盘（沿用预览阶段已经拉到的原文，避免二次请求）。
@@ -1296,8 +1410,8 @@ class AppState extends ChangeNotifier {
       url: preview.url,
       baseUrl: preview.baseUrl,
       name: preview.name,
-      previewWarnings: preview.warnings,
-      previewMergedCount: preview.mergedCount,
+      preview: preview,
+      task: preview._background?.task,
     );
   }
 
@@ -1353,7 +1467,12 @@ class AppState extends ChangeNotifier {
   }
 
   Future<({String text, String url, String baseUrl, String name})>
-  _loadImportUrl(String url, {String? name}) async {
+  _loadImportUrl(
+    String url, {
+    String? name,
+    SubscriptionImportTask? task,
+  }) async {
+    task?._checkCancelled();
     final trimmed = url.trim();
     if (trimmed.isEmpty) throw AppException('请输入订阅地址');
     // CatVod 猫源常见写法：`xxx.js.md5` 本身只是一个 md5 摘要文件
@@ -1383,6 +1502,7 @@ class AppState extends ChangeNotifier {
     ];
     HttpResponseText? probe;
     for (final candidate in probeTargets) {
+      task?._checkCancelled();
       probe = await http.probeText(
         candidate,
         headers: const {'User-Agent': 'okhttp/3.12.0'},
@@ -1392,6 +1512,7 @@ class AppState extends ChangeNotifier {
       );
       if (probe != null) break;
     }
+    task?._checkCancelled();
     final probeHead = (probe?.body ?? '').trimLeft();
     final probedLive =
         probeHead.startsWith('#EXTM3U') ||
@@ -1411,12 +1532,15 @@ class AppState extends ChangeNotifier {
       });
       return (text: liveJson, url: trimmed, baseUrl: '', name: label);
     }
-    final res = await _fetchSubscription(trimmed);
-    final raw = res.body;
-    _ensureTextResponse(raw, res.contentType);
-    // 有的订阅把 JSON 包成 base64 / CBC 密文，先解一层再判断形态。
-    final body = ConfigParser.decodePayload(raw);
-    if (_looksLikeLiveList(body)) {
+    final res = await _fetchSubscription(trimmed, task: task);
+    task?._checkCancelled();
+    final (body, isLiveList) = await runConfigWork(
+      res.body.length,
+      _decodeSubscription,
+      res,
+    );
+    task?._checkCancelled();
+    if (isLiveList) {
       // 直播列表不是 TVBox 配置：包成只含 live 的配置，直播页即可直接使用。
       final label = (name ?? '').trim().isNotEmpty
           ? name!.trim()
@@ -1445,20 +1569,28 @@ class AppState extends ChangeNotifier {
     required String url,
     required String baseUrl,
     String? name,
+    SubscriptionImportTask? task,
   }) async {
+    final runtimeReady = jarReady;
+    final existing = _profileByUrl(url);
     final prepared = await _prepareImport(
       text,
       baseUrl: baseUrl.isEmpty ? url : baseUrl,
+      runtimeReady: runtimeReady,
+      stableKeys: _hasCollectionKeys(existing),
+      allowBackground: existing == null,
+      task: task,
     );
     final parsed = prepared.parsed;
     final current = activeProfile;
     final currentConfig = current == null
         ? const SiteConfig()
-        : ConfigParser.parse(
+        : (await ConfigParser.parseAsync(
             current.rawJson,
             baseUrl: current.resolveBaseUrl,
-            jarReady: jarReady,
-          ).config;
+            jarReady: runtimeReady,
+          )).config;
+    task?._checkCancelled();
     final newSites = {for (final site in parsed.config.sites) site.key: site};
     final oldSites = {for (final site in currentConfig.sites) site.key: site};
     var added = 0;
@@ -1506,6 +1638,9 @@ class AppState extends ChangeNotifier {
       changed: changed,
       warnings: parsed.warnings,
       mergedCount: prepared.mergedCount,
+      parsed: parsed,
+      jarReady: runtimeReady,
+      background: prepared.background,
     );
   }
 
@@ -1518,7 +1653,9 @@ class AppState extends ChangeNotifier {
   Future<HttpResponseText> _fetchSubscription(
     String url, {
     Duration timeout = const Duration(seconds: 60),
+    SubscriptionImportTask? task,
   }) async {
+    task?._checkCancelled();
     final target = normalizeHostUrl(url);
     final deadline = DateTime.now().add(timeout);
     final plainHttp = target.toLowerCase().startsWith('http://');
@@ -1531,6 +1668,7 @@ class AppState extends ChangeNotifier {
       final viaDoh = await _retryWithClientUa(
         target,
         deadline: deadline,
+        task: task,
         useDoh: true,
       );
       if (viaDoh != null && !_needsUaRetry(viaDoh.body, viaDoh.contentType)) {
@@ -1538,6 +1676,7 @@ class AppState extends ChangeNotifier {
       }
     }
 
+    task?._checkCancelled();
     try {
       final remaining = deadline.difference(DateTime.now());
       if (remaining <= Duration.zero) throw TimeoutException('订阅请求超时');
@@ -1559,6 +1698,7 @@ class AppState extends ChangeNotifier {
       final viaDoh = await _retryWithClientUa(
         target,
         deadline: deadline,
+        task: task,
         useDoh: true,
       );
       if (viaDoh != null && !_needsUaRetry(viaDoh.body, viaDoh.contentType)) {
@@ -1566,7 +1706,11 @@ class AppState extends ChangeNotifier {
       }
     }
 
-    final retry = await _retryWithClientUa(target, deadline: deadline);
+    final retry = await _retryWithClientUa(
+      target,
+      deadline: deadline,
+      task: task,
+    );
     if (retry != null && !_needsUaRetry(retry.body, retry.contentType)) {
       return retry;
     }
@@ -1577,6 +1721,7 @@ class AppState extends ChangeNotifier {
       final withCookie = await _retryWithClientUa(
         target,
         deadline: deadline,
+        task: task,
         cookie: cookie,
       );
       if (withCookie != null &&
@@ -1587,13 +1732,18 @@ class AppState extends ChangeNotifier {
 
     final alt = protocolAltUrl(target);
     if (alt.isNotEmpty) {
-      final altRes = await _retryWithClientUa(alt, deadline: deadline);
+      final altRes = await _retryWithClientUa(
+        alt,
+        deadline: deadline,
+        task: task,
+      );
       if (altRes != null && !_needsUaRetry(altRes.body, altRes.contentType)) {
         return altRes;
       }
       final altDoh = await _retryWithClientUa(
         alt,
         deadline: deadline,
+        task: task,
         useDoh: true,
       );
       if (altDoh != null && !_needsUaRetry(altDoh.body, altDoh.contentType)) {
@@ -1601,6 +1751,7 @@ class AppState extends ChangeNotifier {
       }
     }
 
+    task?._checkCancelled();
     if (first != null) return first;
     throw firstError ?? AppException('订阅请求失败');
   }
@@ -1610,7 +1761,9 @@ class AppState extends ChangeNotifier {
     required DateTime deadline,
     String cookie = '',
     bool useDoh = false,
+    SubscriptionImportTask? task,
   }) async {
+    task?._checkCancelled();
     final remaining = deadline.difference(DateTime.now());
     if (remaining <= const Duration(seconds: 2)) return null;
     final referer = siteRootOf(url);
@@ -1647,15 +1800,13 @@ class AppState extends ChangeNotifier {
   }
 
   /// 提前拦住图片 / 网页 / 二进制内容，避免只报「JSON 不合法」。
-  void _ensureTextResponse(String body, String contentType) {
-    // 图片里夹带 base64 订阅（饭太硬 /tv）是合法载体，先放行。
+  static void _ensureTextResponse(String body, String contentType) {
+    // 图片 CDN 也可能直接返回 JSON，先检查正文。只有其他载体需要尝试提取 base64。
+    if (ConfigParser.looksLikeJsonBody(body)) return;
     if (!identical(ConfigParser.decodeEmbeddedBase64Payload(body), body)) {
       return;
     }
     final head = body.trimLeft().replaceFirst('\uFEFF', '').trimLeft();
-    // 很多国产接口会把 JSON 配置伪装成 image/jpeg（挂在图床 CDN 上躲封禁，
-    // 例如 tvbox.王二小放牛娃.top），正文是 JSON 就按配置处理，不看 Content-Type。
-    if (ConfigParser.looksLikeJsonBody(head)) return;
     final type = contentType.toLowerCase();
     if (type.startsWith('image/') ||
         type.startsWith('video/') ||
@@ -1685,7 +1836,7 @@ class AppState extends ChangeNotifier {
   /// 只看开头：TVBox JSON 配置里也可能出现 `#EXTINF`（去广告正则里常带
   /// `#EXT-X-DISCONTINUITY…#EXTINF:3,…`），按「正文任意位置包含标记」判断
   /// 会把 JSON 订阅误当成直播单，导致点播站点一条都导不进去。
-  bool _looksLikeLiveList(String body) {
+  static bool _looksLikeLiveList(String body) {
     final text = body.trimLeft().replaceFirst('\uFEFF', '').trimLeft();
     if (text.isEmpty) return false;
     if (text.startsWith('{') || text.startsWith('[')) return false;
@@ -1712,9 +1863,13 @@ class AppState extends ChangeNotifier {
     return total >= 3 && hits / total > 0.6;
   }
 
-  Future<ImportOutcome> importFromJson(String text, {String? name}) async {
+  Future<ImportOutcome> importFromJson(
+    String text, {
+    String? name,
+    SubscriptionImportTask? task,
+  }) async {
     if (text.trim().isEmpty) throw AppException('请粘贴配置 JSON');
-    return _importText(text, url: '', name: name ?? '本地配置');
+    return _importText(text, url: '', name: name ?? '本地配置', task: task);
   }
 
   /// 本地文本导入（本地 .json / 本地 .py / 本地包生成的配置）。
@@ -1734,16 +1889,19 @@ class AppState extends ChangeNotifier {
     if (!RegExp(r'^https?://', caseSensitive: false).hasMatch(url)) {
       throw AppException('本地配置没有可刷新的订阅地址');
     }
+    _backgroundCollections.remove(id)?.task.cancel();
     // 订阅内容可能换了 PY 脚本地址或直接替换了脚本内容：本次会话的旧缓存作废。
     sourceService.py.clearScriptCache();
     final sw = Stopwatch()..start();
     AppLog.i('import', '刷新订阅开始 name=${profile.name} url=${redactUrl(url)}');
     try {
       final res = await _fetchSubscription(url);
-      final raw = res.body;
-      _ensureTextResponse(raw, res.contentType);
-      final body = ConfigParser.decodePayload(raw);
-      if (_looksLikeLiveList(body)) {
+      final (body, isLiveList) = await runConfigWork(
+        res.body.length,
+        _decodeSubscription,
+        res,
+      );
+      if (isLiveList) {
         final liveJson = jsonEncode({
           'lives': [
             {'name': profile.name, 'api': url, 'type': 0},
@@ -1785,6 +1943,14 @@ class AppState extends ChangeNotifier {
       );
       rethrow;
     }
+  }
+
+  ConfigProfile? _profileByUrl(String url) {
+    if (url.isEmpty) return null;
+    for (final profile in profiles) {
+      if (profile.url == url) return profile;
+    }
+    return null;
   }
 
   ConfigProfile? _profileById(String id) {
@@ -1897,27 +2063,133 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 预览、直接导入和刷新使用同一份多仓展开结果；这里只读，不写入档案。
-  Future<({String text, ParsedConfig parsed, int mergedCount})> _prepareImport(
-    String text, {
-    required String baseUrl,
-  }) async {
-    text = ConfigParser.decodePayload(text);
+  static (String, bool) _decodeSubscription(HttpResponseText response) {
+    _ensureTextResponse(response.body, response.contentType);
+    final body = ConfigParser.decodePayload(response.body);
+    return (body, _looksLikeLiveList(body));
+  }
+
+  static ({
+    String text,
+    ParsedConfig parsed,
+    List<MultiConfigEntry>? rawEntries,
+  })
+  _parseImport(({String text, String baseUrl, bool runtimeReady}) input) {
+    final text = ConfigParser.decodePayload(input.text);
     final parsed = ConfigParser.parse(
       text,
-      baseUrl: baseUrl,
-      jarReady: jarReady,
+      baseUrl: input.baseUrl,
+      jarReady: input.runtimeReady,
     );
-    if (parsed.multiUrls.isEmpty) {
-      return (text: text, parsed: parsed, mergedCount: 0);
+    return (
+      text: text,
+      parsed: parsed,
+      rawEntries: parsed.multiUrls.isEmpty
+          ? null
+          : ConfigParser.parseCollection(text),
+    );
+  }
+
+  static ParsedConfig _parseChildSubscription(
+    ({HttpResponseText response, bool runtimeReady}) input,
+  ) {
+    final response = input.response;
+    _ensureTextResponse(response.body, response.contentType);
+    final parsed = ConfigParser.parse(
+      response.body,
+      baseUrl: response.url,
+      jarReady: input.runtimeReady,
+    );
+    if (parsed.multiUrls.isNotEmpty) throw AppException('嵌套多仓未展开');
+    if (parsed.config.sites.isEmpty && parsed.config.lives.isEmpty) {
+      throw AppException('没有可导入的点播源或直播源');
+    }
+    return parsed;
+  }
+
+  static const _collectionKeysField = 'misaCollectionKeys';
+  static final _collectionKeysMarker = RegExp(
+    r'^\s*\{\s*"misaCollectionKeys"\s*:\s*1\s*[,}]',
+  );
+
+  static bool _hasCollectionKeys(ConfigProfile? profile) =>
+      profile != null && _collectionKeysMarker.hasMatch(profile.rawJson);
+
+  static ({String text, ParsedConfig parsed}) _mergeSubscriptions(
+    ({
+      List<_LoadedSubscription> children,
+      String baseUrl,
+      bool runtimeReady,
+      bool stableKeys,
+    })
+    input,
+  ) {
+    final children = input.children.toList()
+      ..sort((a, b) => a.index.compareTo(b.index));
+    final merged = ConfigParser.merge(
+      [for (final child in children) child.parsed.config],
+      siteKeyPrefixes: input.stableKeys
+          ? [
+              for (final child in children)
+                'multi_${sha256.convert(utf8.encode(child.url))}_',
+            ]
+          : null,
+    );
+    final rawJson = jsonEncode({
+      if (input.stableKeys) _collectionKeysField: 1,
+      ...merged.toJson(),
+    });
+    return (
+      text: rawJson,
+      parsed: ConfigParser.parse(
+        rawJson,
+        baseUrl: input.baseUrl,
+        jarReady: input.runtimeReady,
+      ),
+    );
+  }
+
+  Future<_PreparedImport> _prepareImport(
+    String text, {
+    required String baseUrl,
+    required bool runtimeReady,
+    required bool stableKeys,
+    required bool allowBackground,
+    SubscriptionImportTask? task,
+  }) async {
+    task?._checkCancelled();
+    final input = await runConfigWork(text.length, _parseImport, (
+      text: text,
+      baseUrl: baseUrl,
+      runtimeReady: runtimeReady,
+    ));
+    task?._checkCancelled();
+    final parsed = input.parsed;
+    final entries = parsed.multiUrls;
+    if (entries.isEmpty) {
+      return (
+        text: input.text,
+        parsed: parsed,
+        mergedCount: 0,
+        background: null,
+      );
     }
 
-    final entries = parsed.multiUrls;
-    final results = List<ParsedConfig?>.filled(entries.length, null);
+    final background =
+        allowBackground &&
+            task != null &&
+            task.allowBackground &&
+            entries.length > 1
+        ? _CollectionImport(task, entries.length)
+        : null;
+    final results = List<_LoadedSubscription?>.filled(entries.length, null);
     final failures = List<String?>.filled(entries.length, null);
     var next = 0;
+    var completed = 0;
+    task?.onProgress?.call(completed, entries.length);
+
     Future<void> loadNext() async {
-      while (next < entries.length) {
+      while (next < entries.length && task?.isCancelled != true) {
         final index = next++;
         final entry = entries[index];
         final label = entry.name.isEmpty ? entry.url : entry.name;
@@ -1930,49 +2202,156 @@ class AppState extends ChangeNotifier {
           final res = await _fetchSubscription(
             childUrl,
             timeout: const Duration(seconds: 20),
+            task: task,
           );
-          _ensureTextResponse(res.body, res.contentType);
-          final sub = ConfigParser.parse(
-            res.body,
-            baseUrl: res.url,
-            jarReady: jarReady,
+          task?._checkCancelled();
+          final child = await runConfigWork(
+            res.body.length,
+            _parseChildSubscription,
+            (response: res, runtimeReady: runtimeReady),
           );
-          if (sub.multiUrls.isNotEmpty) throw AppException('嵌套多仓未展开');
-          if (sub.config.sites.isEmpty && sub.config.lives.isEmpty) {
-            throw AppException('没有可导入的点播源或直播源');
+          task?._checkCancelled();
+          final result = (
+            index: index,
+            url: input.rawEntries?[index].url ?? entry.url,
+            parsed: child,
+            size: res.body.length,
+          );
+          results[index] = result;
+          if (background != null) {
+            background.results.add(result);
+            if (!background.first.isCompleted) {
+              background.first.complete(result);
+            }
           }
-          results[index] = sub;
+        } on _ImportCancelled {
+          return;
         } catch (e) {
           failures[index] = '$label: $e';
         }
+        if (task?.isCancelled == true) return;
+        completed++;
+        task?.onProgress?.call(completed, entries.length);
       }
     }
 
-    // 少量并发避免数十条失效线路逐条等满超时；按原顺序合并，结果不受响应速度影响。
-    await Future.wait([
+    Future<_PreparedImport> merge(List<_LoadedSubscription> children) async {
+      task?._checkCancelled();
+      final errors = failures.whereType<String>().toList();
+      final merged = await runConfigWork(
+        children.fold(0, (size, child) => size + child.size),
+        _mergeSubscriptions,
+        (
+          children: children,
+          baseUrl: baseUrl,
+          runtimeReady: runtimeReady,
+          stableKeys: stableKeys || background != null,
+        ),
+      );
+      task?._checkCancelled();
+      return (
+        text: merged.text,
+        parsed: ParsedConfig(
+          config: merged.parsed.config,
+          report: merged.parsed.report,
+          warnings: [
+            ...parsed.warnings,
+            for (final child in children) ...child.parsed.warnings,
+            ...errors,
+          ],
+        ),
+        mergedCount: children.length,
+        background: background,
+      );
+    }
+
+    final loading = Future.wait([
       for (var i = 0; i < entries.length && i < 4; i++) loadNext(),
     ]);
-    final loaded = results.whereType<ParsedConfig>().toList();
-    final errors = failures.whereType<String>().toList();
-    if (loaded.isEmpty) {
-      throw AppException('多仓订阅展开失败：${errors.take(3).join('；')}');
+    if (background != null) {
+      background.merge = merge;
+      background.done = loading.then((_) {
+        if (!background.first.isCompleted) background.first.complete(null);
+      });
+      final first = await background.first.future;
+      task?._checkCancelled();
+      if (first != null) return merge([first]);
+    } else {
+      await loading;
+      task?._checkCancelled();
+      final loaded = results.whereType<_LoadedSubscription>().toList();
+      if (loaded.isNotEmpty) return merge(loaded);
     }
-    final merged = ConfigParser.merge([for (final sub in loaded) sub.config]);
-    final rawJson = jsonEncode(merged.toJson());
-    final mergedParsed = ConfigParser.parse(rawJson, jarReady: jarReady);
-    return (
-      text: rawJson,
-      parsed: ParsedConfig(
-        config: mergedParsed.config,
-        report: mergedParsed.report,
-        warnings: [
-          ...parsed.warnings,
-          for (final sub in loaded) ...sub.warnings,
-          ...errors,
-        ],
-      ),
-      mergedCount: loaded.length,
+    final errors = failures.whereType<String>();
+    throw AppException('多仓订阅展开失败：${errors.take(3).join('；')}');
+  }
+
+  Future<void> _completeCollection(
+    String id,
+    _CollectionImport background,
+    int initialCount,
+  ) async {
+    var mergedCount = initialCount;
+    try {
+      while (!background.task.isCancelled) {
+        final interval = Completer<bool>();
+        final timer = Timer(
+          const Duration(seconds: 2),
+          () => interval.complete(false),
+        );
+        final bool finished;
+        try {
+          finished = await Future.any([
+            background.done.then((_) => true),
+            interval.future,
+          ]);
+        } finally {
+          timer.cancel();
+        }
+        final profile = _profileById(id);
+        if (!identical(_backgroundCollections[id], background) ||
+            profile == null) {
+          return;
+        }
+        if (background.results.length > mergedCount) {
+          final batch = await background.merge(background.results.toList());
+          await _importText(
+            batch.text,
+            url: profile.url,
+            baseUrl: profile.baseUrl,
+            replaceProfileId: id,
+            activate: false,
+            task: background.task,
+            backgroundUpdate: background,
+            preparedOverride: batch,
+          );
+          mergedCount = batch.mergedCount;
+        }
+        if (finished && background.results.length == mergedCount) return;
+      }
+    } on _ImportCancelled {
+      // 已删除、刷新或替换的订阅由新操作接管。
+    } catch (e, stack) {
+      background.task.cancel();
+      AppLog.e('import', '后台合并子订阅失败 id=$id', e, stack);
+    } finally {
+      if (identical(_backgroundCollections[id], background)) {
+        _backgroundCollections.remove(id);
+      }
+    }
+  }
+
+  static String _keepProfileChanges(
+    ({String rawJson, ConfigProfile profile}) input,
+  ) {
+    final profile = input.profile;
+    final sites = mergeAddedSites(
+      input.rawJson,
+      profile,
+      profile.addedSiteKeys,
     );
+    final lives = mergeAddedLives(sites, profile, profile.addedLiveKeys);
+    return _pruneDeletedSites(lives, profile.deletedSiteKeys);
   }
 
   Future<ImportOutcome> _importText(
@@ -1983,13 +2362,46 @@ class AppState extends ChangeNotifier {
     String? replaceProfileId,
     bool activate = true,
     bool requireContent = false,
-    List<String> previewWarnings = const [],
-    int previewMergedCount = 0,
+    ImportPreview? preview,
+    SubscriptionImportTask? task,
+    _CollectionImport? backgroundUpdate,
+    _PreparedImport? preparedOverride,
   }) async {
-    final prepared = await _prepareImport(text, baseUrl: baseUrl ?? url);
+    ConfigProfile? findExisting() => replaceProfileId == null
+        ? _profileByUrl(url)
+        : _profileById(replaceProfileId);
+
+    final previous = findExisting();
+    final runtimeReady = jarReady;
+    final previewConfig = preview?._jarReady == runtimeReady
+        ? preview?._parsed
+        : null;
+    final prepared =
+        preparedOverride ??
+        (previewConfig != null
+            ? (
+                text: text,
+                parsed: previewConfig,
+                mergedCount: 0,
+                background: null,
+              )
+            : await _prepareImport(
+                text,
+                baseUrl: baseUrl ?? url,
+                runtimeReady: runtimeReady,
+                stableKeys: _hasCollectionKeys(previous),
+                allowBackground: previous == null && replaceProfileId == null,
+                task: task,
+              ));
+    final startBackground = backgroundUpdate == null
+        ? prepared.background ?? preview?._background
+        : null;
     var parsed = prepared.parsed;
-    final warnings = <String>{...previewWarnings, ...parsed.warnings}.toList();
-    final mergedCount = previewMergedCount + prepared.mergedCount;
+    final warnings = <String>{
+      ...?preview?.warnings,
+      ...parsed.warnings,
+    }.toList();
+    final mergedCount = (preview?.mergedCount ?? 0) + prepared.mergedCount;
     var rawJson = prepared.text;
 
     if (requireContent &&
@@ -2000,47 +2412,46 @@ class AppState extends ChangeNotifier {
 
     // 同一个订阅地址（或指定档案）就地替换；用户删过的源按墓碑过滤，刷新后不复活。
     ConfigProfile? existing;
-    if (replaceProfileId != null) {
-      existing = _profileById(replaceProfileId);
-    } else if (url.isNotEmpty) {
-      for (final p in profiles) {
-        if (p.url == url) {
-          existing = p;
-          break;
+    // 保留后台处理期间新增的本地源和墓碑。已删除的档案不能被刷新复活。
+    do {
+      task?._checkCancelled();
+      existing = findExisting();
+      if (startBackground != null && existing != null) {
+        throw AppException('该订阅已导入，请刷新已有订阅');
+      }
+      if (replaceProfileId != null && existing == null) {
+        throw AppException('配置不存在');
+      }
+      rawJson = prepared.text;
+      parsed = prepared.parsed;
+      if (existing != null &&
+          (existing.addedSiteKeys.isNotEmpty ||
+              existing.addedLiveKeys.isNotEmpty ||
+              existing.deletedSiteKeys.isNotEmpty)) {
+        rawJson = await runConfigWork(
+          rawJson.length + existing.rawJson.length,
+          _keepProfileChanges,
+          (rawJson: rawJson, profile: existing),
+        );
+        task?._checkCancelled();
+        if (rawJson != prepared.text) {
+          parsed = await ConfigParser.parseAsync(
+            rawJson,
+            baseUrl: baseUrl ?? url,
+            jarReady: runtimeReady,
+          );
         }
       }
+    } while (existing != findExisting());
+
+    task?._checkCancelled();
+    if (backgroundUpdate == null) task?.onSaving?.call();
+    if (existing != null && backgroundUpdate == null) {
+      _backgroundCollections.remove(existing.id)?.task.cancel();
     }
     final deletedKeys = existing?.deletedSiteKeys ?? const <String>[];
     final addedKeys = existing?.addedSiteKeys ?? const <String>[];
     final addedLiveKeys = existing?.addedLiveKeys ?? const <String>[];
-    final merged = mergeAddedSites(rawJson, existing, addedKeys);
-    if (merged != rawJson) {
-      rawJson = merged;
-      parsed = ConfigParser.parse(
-        rawJson,
-        baseUrl: baseUrl ?? url,
-        jarReady: jarReady,
-      );
-    }
-    // 本地并入的直播线路同样要保活：否则刷新一次就被远端内容冲掉。
-    final mergedLives = mergeAddedLives(rawJson, existing, addedLiveKeys);
-    if (mergedLives != rawJson) {
-      rawJson = mergedLives;
-      parsed = ConfigParser.parse(
-        rawJson,
-        baseUrl: baseUrl ?? url,
-        jarReady: jarReady,
-      );
-    }
-    final pruned = _pruneDeletedSites(rawJson, deletedKeys);
-    if (pruned != rawJson) {
-      rawJson = pruned;
-      parsed = ConfigParser.parse(
-        rawJson,
-        baseUrl: baseUrl ?? url,
-        jarReady: jarReady,
-      );
-    }
     final effective = _withoutDeletedSites(parsed.config, deletedKeys);
 
     final now = DateTime.now();
@@ -2065,7 +2476,9 @@ class AppState extends ChangeNotifier {
 
     if (existing != null) {
       // 内容没变的刷新不记快照，避免订阅历史被同一条重复版本占满。
-      if (existing.rawJson != rawJson) _rememberProfileSnapshot(existing);
+      if (backgroundUpdate == null && existing.rawJson != rawJson) {
+        _rememberProfileSnapshot(existing);
+      }
       profiles = [
         for (final p in profiles)
           if (p.id == existing.id) profile else p,
@@ -2083,7 +2496,9 @@ class AppState extends ChangeNotifier {
         (existing != null && activeLiveProfileId == existing.id);
 
     // 点播：纯直播订阅（M3U / TXT / 只有 lives 的 JSON）不碰点播档案。
-    if (!liveOnly && (activate || activeProfileId == profile.id)) {
+    final fillEmptyVod = backgroundUpdate != null && activeProfileId == null;
+    if (!liveOnly &&
+        (activate || activeProfileId == profile.id || fillEmptyVod)) {
       activeProfileId = profile.id;
       _setConfig(effective);
       _syncGlobalJar();
@@ -2116,7 +2531,13 @@ class AppState extends ChangeNotifier {
     if (!liveOnly) {
       searchService.clearCache();
     }
-    if (activate && !liveOnly && config != null) await _purgeUnusedJars();
+    if (activate && startBackground == null && !liveOnly && config != null) {
+      await _purgeUnusedJars();
+    }
+    if (startBackground != null && _profileById(profile.id) != null) {
+      _backgroundCollections[profile.id] = startBackground;
+      unawaited(_completeCollection(profile.id, startBackground, mergedCount));
+    }
     notifyListeners();
     AppLog.i(
       'import',
@@ -2296,7 +2717,7 @@ class AppState extends ChangeNotifier {
     }
     activeProfileId = id;
     await store.setActiveProfileId(id);
-    _loadActiveConfig();
+    await _loadActiveConfig();
     await store.setActiveSiteKey(activeSiteKey);
     notifyListeners();
     AppLog.i(
@@ -2311,7 +2732,7 @@ class AppState extends ChangeNotifier {
     if (profile == null || profile.liveCount <= 0) return;
     activeLiveProfileId = id;
     await store.setActiveLiveProfileId(id);
-    _loadActiveLiveConfig();
+    await _loadActiveLiveConfig();
     await store.setActiveLiveKey(activeLiveKey);
     notifyListeners();
     AppLog.i(
@@ -2321,13 +2742,14 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> removeProfile(String id) async {
+    _backgroundCollections.remove(id)?.task.cancel();
     final wasLive = activeLiveProfileId == id;
     profiles = profiles.where((p) => p.id != id).toList();
     final current = activeProfile;
     if (activeProfileId == id || (current != null && current.isLiveOnly)) {
       final vod = vodProfiles;
       activeProfileId = vod.isNotEmpty ? vod.first.id : null;
-      _loadActiveConfig();
+      await _loadActiveConfig();
       await store.setActiveProfileId(activeProfileId);
       await store.setActiveSiteKey(activeSiteKey);
     }
@@ -2335,7 +2757,7 @@ class AppState extends ChangeNotifier {
       activeLiveProfileId = liveProfiles.isNotEmpty
           ? liveProfiles.first.id
           : null;
-      _loadActiveLiveConfig();
+      await _loadActiveLiveConfig();
       await store.setActiveLiveProfileId(activeLiveProfileId);
       await store.setActiveLiveKey(activeLiveKey);
     }
@@ -3181,6 +3603,10 @@ class AppState extends ChangeNotifier {
 
   /// 还原备份（原生备份或旧版 Win-Box 备份，由 [BackupData.parse] 归一）。
   Future<void> restoreBackupData(Map<String, dynamic> data) async {
+    for (final background in _backgroundCollections.values) {
+      background.task.cancel();
+    }
+    _backgroundCollections.clear();
     final incomingProfiles = <ConfigProfile>[];
     if (data['profiles'] is List) {
       for (final item in data['profiles'] as List) {
@@ -3356,11 +3782,11 @@ class AppState extends ChangeNotifier {
       _kazumiRev++;
     }
 
-    _loadActiveConfig();
+    await _loadActiveConfig();
     if (activeSiteKey == null || activeSiteKey!.isEmpty) {
       activeSiteKey = fallbackSite?.key;
     }
-    _loadActiveLiveConfig();
+    await _loadActiveLiveConfig();
 
     _syncGlobalJar();
     _syncDriveTokens();
