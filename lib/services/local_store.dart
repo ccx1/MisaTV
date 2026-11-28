@@ -14,12 +14,14 @@ import '../models/sync_settings.dart';
 import '../models/user_data.dart';
 import '../models/video_download_record.dart';
 import '../models/xunlei_account.dart';
+import 'config_parser.dart' show runConfigWork;
 import 'player/skip_segments.dart';
 import 'sync/history_sync.dart';
 
 class LocalStore {
   LocalStore(this._prefs);
   final SharedPreferences _prefs;
+  Future<void>? _profileWrites;
 
   static const kProfiles = 'kniephos.profiles';
   static const kProfileHistory = 'kniephos.profileHistory';
@@ -91,9 +93,16 @@ class LocalStore {
   /// 重新从磁盘读取偏好（独立播放器窗口写回的历史/设置同步用）。
   Future<void> reload() => reloadPortablePrefs();
 
-  List<ConfigProfile> loadProfiles() {
-    final raw = _prefs.getString(kProfiles);
-    if (raw == null || raw.isEmpty) return [];
+  List<ConfigProfile> loadProfiles() =>
+      _decodeProfiles(_prefs.getString(kProfiles) ?? '');
+
+  Future<List<ConfigProfile>> loadProfilesAsync() {
+    final raw = _prefs.getString(kProfiles) ?? '';
+    return runConfigWork(raw.length, _decodeProfiles, raw);
+  }
+
+  static List<ConfigProfile> _decodeProfiles(String raw) {
+    if (raw.isEmpty) return [];
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! List) return [];
@@ -106,15 +115,31 @@ class LocalStore {
     }
   }
 
-  Future<void> saveProfiles(List<ConfigProfile> profiles) => _prefs.setString(
-    kProfiles,
-    jsonEncode(profiles.map((e) => e.toJson()).toList()),
-  );
+  Future<void> saveProfiles(List<ConfigProfile> profiles) {
+    return _queueProfileWrite(() async {
+      final size = profiles.fold(
+        0,
+        (sum, profile) => sum + profile.rawJson.length,
+      );
+      final encoded = await runConfigWork(size, _encodeProfiles, profiles);
+      await _prefs.setString(kProfiles, encoded);
+    });
+  }
+
+  static String _encodeProfiles(List<ConfigProfile> profiles) =>
+      jsonEncode(profiles.map((profile) => profile.toJson()).toList());
 
   /// 订阅原文快照（刷新 / 重新导入前保存，回滚用）。
-  List<ConfigSnapshot> loadProfileHistory() {
-    final raw = _prefs.getString(kProfileHistory);
-    if (raw == null || raw.isEmpty) return [];
+  List<ConfigSnapshot> loadProfileHistory() =>
+      _decodeProfileHistory(_prefs.getString(kProfileHistory) ?? '');
+
+  Future<List<ConfigSnapshot>> loadProfileHistoryAsync() {
+    final raw = _prefs.getString(kProfileHistory) ?? '';
+    return runConfigWork(raw.length, _decodeProfileHistory, raw);
+  }
+
+  static List<ConfigSnapshot> _decodeProfileHistory(String raw) {
+    if (raw.isEmpty) return [];
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! List) return [];
@@ -128,11 +153,31 @@ class LocalStore {
     }
   }
 
-  Future<void> saveProfileHistory(List<ConfigSnapshot> history) =>
-      _prefs.setString(
-        kProfileHistory,
-        jsonEncode(history.map((e) => e.toJson()).toList()),
+  Future<void> saveProfileHistory(List<ConfigSnapshot> history) {
+    return _queueProfileWrite(() async {
+      final size = history.fold(
+        0,
+        (sum, snapshot) => sum + snapshot.rawJson.length,
       );
+      final encoded = await runConfigWork(size, _encodeProfileHistory, history);
+      await _prefs.setString(kProfileHistory, encoded);
+    });
+  }
+
+  // 后台编码结束的先后不影响档案与快照的写入顺序。
+  Future<void> _queueProfileWrite(Future<void> Function() save) {
+    final pending = _profileWrites;
+    final write = pending == null
+        ? save()
+        : pending.then((_) => save(), onError: (Object _) => save());
+    _profileWrites = write;
+    return write.whenComplete(() {
+      if (identical(_profileWrites, write)) _profileWrites = null;
+    });
+  }
+
+  static String _encodeProfileHistory(List<ConfigSnapshot> history) =>
+      jsonEncode(history.map((snapshot) => snapshot.toJson()).toList());
 
   /// 本地导入的 Kazumi 规则（原始 JSON 数组，便于版本升级后重新解析）。
   List<Map<String, dynamic>> loadKazumiRules() {

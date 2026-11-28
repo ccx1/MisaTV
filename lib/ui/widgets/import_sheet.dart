@@ -76,9 +76,12 @@ class _ImportSheetState extends State<_ImportSheet>
   bool _loading = false;
   bool _previewBeforeImport = true;
   String? _error;
+  String? _importStatus;
+  SubscriptionImportTask? _importTask;
 
   @override
   void dispose() {
+    _importTask?.cancel();
     _tabs.dispose();
     _url.dispose();
     _json.dispose();
@@ -88,38 +91,87 @@ class _ImportSheetState extends State<_ImportSheet>
 
   Future<void> _submit(bool fromUrl) async {
     if (_loading) return;
+    final task = SubscriptionImportTask(
+      allowBackground: true,
+      onProgress: (completed, total) {
+        if (!mounted || _importTask == null) return;
+        setState(() {
+          _importStatus = completed == total
+              ? '正在合并订阅…'
+              : '正在加载子订阅 $completed / $total';
+        });
+      },
+      onSaving: () {
+        if (!mounted) return;
+        setState(() {
+          _importTask = null;
+          _importStatus = '正在保存订阅…';
+        });
+      },
+    );
     setState(() {
       _loading = true;
       _error = null;
+      _importStatus = null;
+      _importTask = task;
     });
     final app = AppScope.of(context);
     try {
       final ImportOutcome outcome;
       if (_previewBeforeImport) {
         final preview = fromUrl
-            ? await app.previewImportFromUrl(_url.text, name: _name.text)
-            : await app.previewImportText(_json.text, name: _name.text);
-        if (!mounted) return;
+            ? await app.previewImportFromUrl(
+                _url.text,
+                name: _name.text,
+                task: task,
+              )
+            : await app.previewImportText(
+                _json.text,
+                name: _name.text,
+                task: task,
+              );
+        if (!mounted || _importTask != task) return;
         final confirmed = await _confirmPreview(preview);
+        if (!mounted || _importTask != task) return;
         if (confirmed != true) {
-          if (mounted) setState(() => _loading = false);
+          task.cancel();
+          setState(() {
+            _loading = false;
+            _importTask = null;
+          });
           return;
         }
+        setState(() {
+          _importTask = null;
+          _importStatus = '正在保存订阅…';
+        });
         outcome = await app.commitImportPreview(preview);
       } else {
         outcome = fromUrl
-            ? await app.importFromUrl(_url.text, name: _name.text)
-            : await app.importFromJson(_json.text, name: _name.text);
+            ? await app.importFromUrl(_url.text, name: _name.text, task: task)
+            : await app.importFromJson(
+                _json.text,
+                name: _name.text,
+                task: task,
+              );
       }
       if (!mounted) return;
       Navigator.of(context).pop(outcome);
     } catch (e) {
-      if (!mounted) return;
+      if (!mounted || task.isCancelled) return;
+      task.cancel();
       setState(() {
         _loading = false;
+        _importTask = null;
         _error = e.toString();
       });
     }
+  }
+
+  void _cancelImport() {
+    if (ModalRoute.of(context)?.isCurrent != true) return;
+    _importTask?.cancel();
+    Navigator.of(context).pop();
   }
 
   Future<bool?> _confirmPreview(ImportPreview preview) {
@@ -148,6 +200,11 @@ class _ImportSheetState extends State<_ImportSheet>
               if (preview.mergedCount > 0)
                 Text(
                   '已合并 ${preview.mergedCount} 条线路',
+                  style: theme.textTheme.bodySmall,
+                ),
+              if (preview.remainingSubscriptions > 0)
+                Text(
+                  '其余 ${preview.remainingSubscriptions} 条子订阅在后台加载，成功后自动合入。',
                   style: theme.textTheme.bodySmall,
                 ),
               const SizedBox(height: 12),
@@ -324,7 +381,7 @@ class _ImportSheetState extends State<_ImportSheet>
     // 小分辨率窗口里整块内容比屏幕还高：限制高度并让中间区域滚动，
     // 「开始导入 / 取消」固定在底部，永远不会被裁掉。
     final maxHeight = MediaQuery.sizeOf(context).height * 0.92;
-    return SafeArea(
+    final sheet = SafeArea(
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: 720, maxHeight: maxHeight),
         child: Padding(
@@ -528,14 +585,14 @@ class _ImportSheetState extends State<_ImportSheet>
                               child: CircularProgressIndicator(strokeWidth: 2),
                             )
                           : const Icon(Icons.download_rounded),
-                      label: Text(_loading ? '正在导入…' : '开始导入'),
+                      label: Text(_loading ? _importStatus ?? '正在导入…' : '开始导入'),
                     ),
                   ),
                   const SizedBox(width: 12),
                   TextButton(
-                    onPressed: _loading
-                        ? null
-                        : () => Navigator.of(context).pop(),
+                    onPressed: !_loading || _importTask != null
+                        ? _cancelImport
+                        : null,
                     child: const Text('取消'),
                   ),
                 ],
@@ -544,6 +601,12 @@ class _ImportSheetState extends State<_ImportSheet>
           ),
         ),
       ),
+    );
+    return PopScope<ImportOutcome>(
+      onPopInvokedWithResult: (didPop, _) {
+        if (didPop) _importTask?.cancel();
+      },
+      child: sheet,
     );
   }
 }
